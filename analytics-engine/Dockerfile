@@ -4,5 +4,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY analyzer.py .
 COPY dashboard.py .
-# Default command (can be overridden by K8s)
-CMD ["python", "analyzer.py"]
+# İŞTE EKSİK OLAN KISIM BURASIYDI:
+COPY entrypoint.sh .
+RUN chmod +x entrypoint.sh
+EXPOSE 8501
+CMD ["/bin/bash", "entrypoint.sh"]

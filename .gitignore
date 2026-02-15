@@ -1,19 +1,7 @@
-# Java & Maven
-target/
-*.class
-.mvn/
-*.iml
-.idea/
-.vscode/
-
-# Python
-venv/
 __pycache__/
 *.pyc
-.pytest_cache/
-
-# Sistem & Diğerleri
+.ipynb_checkpoints/
+.env
+venv/
 .DS_Store
-Thumbs.db
 *.log
-minikube-linux-amd64

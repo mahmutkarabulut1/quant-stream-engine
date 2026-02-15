@@ -1,41 +1,45 @@
-# Quant-Stream Intelligence Engine Management
-# Powered by Mahmut's Nitro Laptop & Kubernetes
+IMAGE_NAME := mahmut/analytics-engine:v1
+K8S_FILE := k8s/apps.yaml
+PORT := 8501
+APP_LABEL := app=dashboard-engine
+SERVICE_NAME := svc/dashboard-service
 
-COLLECTOR_IMAGE=mahmut/data-collector:v1
-ANALYTICS_IMAGE=mahmut/analytics-engine:v1
-K8S_DIR=k8s
+.PHONY: all setup build deploy clean tunnel logs wait help
 
-.PHONY: help build-all deploy restart-dashboard service logs-analytics clean
+all: help
 
-help:
-	@echo "Available commands:"
-	@echo "  make build-all      - Build both Java and Python Docker images"
-	@echo "  make deploy         - Apply all Kubernetes manifests"
-	@echo "  make restart-dashboard - Rebuild and restart the analytics dashboard"
-	@echo "  make service        - Expose the dashboard via Minikube"
-	@echo "  make logs-analytics - Stream logs from the analytics engine"
-	@echo "  make clean          - Delete all deployments and services"
+setup: clean build deploy wait
+	@echo "Setup complete. Run 'make tunnel' to access the dashboard."
 
-build-all:
-	@echo "Building Data Collector..."
-	eval $$(minikube docker-env) && cd data-collector && docker build -t $(COLLECTOR_IMAGE) .
-	@echo "Building Analytics Engine..."
-	eval $$(minikube docker-env) && cd analytics-engine && docker build -t $(ANALYTICS_IMAGE) .
+build:
+	@echo "Building Docker image..."
+	@eval $$(minikube docker-env) && docker build -t $(IMAGE_NAME) ./analytics-engine
+
+clean:
+	@echo "Cleaning up legacy resources..."
+	-kubectl delete -f $(K8S_FILE) --ignore-not-found
+	-sudo fuser -k $(PORT)/tcp > /dev/null 2>&1
+	-pkill -f "kubectl port-forward" > /dev/null 2>&1
 
 deploy:
 	@echo "Deploying to Kubernetes..."
-	kubectl apply -f $(K8S_DIR)/apps.yaml
+	kubectl apply -f $(K8S_FILE)
 
-restart-dashboard:
-	@echo "Hot-reloading Dashboard..."
-	eval $$(minikube docker-env) && cd analytics-engine && docker build -t $(ANALYTICS_IMAGE) .
-	kubectl delete pod -l app=dashboard-engine
+wait:
+	@echo "Waiting for pod to be ready..."
+	kubectl wait --for=condition=ready pod -l $(APP_LABEL) --timeout=120s
 
-service:
-	minikube service dashboard-service
+tunnel:
+	@echo "Opening tunnel to localhost:$(PORT)..."
+	@echo "Access here: http://localhost:$(PORT)"
+	kubectl port-forward $(SERVICE_NAME) $(PORT):$(PORT)
 
-logs-analytics:
-	kubectl logs -f deployment/analytics-engine
+logs:
+	kubectl logs -l $(APP_LABEL) -f
 
-clean:
-	kubectl delete -f $(K8S_DIR)/apps.yaml
+help:
+	@echo "Available commands:"
+	@echo "  make setup   - Clean, Build, Deploy, and Wait"
+	@echo "  make tunnel  - Start the connection"
+	@echo "  make logs    - View real-time logs"
+	@echo "  make clean   - Remove all resources"
