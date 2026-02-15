@@ -1,79 +1,97 @@
-# Quant-Stream Intelligence Engine: Distributed Quantitative Analytics Infrastructure
+# QuantStream: Real-Time Financial Data Pipeline and Visualization Engine
 
-## 1. Executive Summary
-The Quant-Stream Intelligence Engine is a high-frequency data engineering pipeline designed for real-time ingestion, processing, and visualization of cryptocurrency market data. Built with a focus on low-latency and high-throughput, the system utilizes a decoupled microservices architecture orchestrated via Kubernetes. It serves as a comprehensive demonstration of full-stack data engineering, encompassing reactive programming in Java, distributed messaging with Kafka, and statistical signal processing in Python.
+QuantStream is a high-throughput, fault-tolerant distributed system designed to ingest, process, and visualize real-time cryptocurrency trade data. Built with a microservices architecture on Kubernetes, it leverages Apache Kafka for event streaming and Streamlit with fragment-based rendering for low-latency visualization.
 
-## 2. System Architecture and Component Design
+## System Architecture
 
-### 2.1. Ingestion Layer (Data-Collector)
-The ingestion module is a Spring Boot application written in Java 17. It establishes a persistent WebSocket connection to the Binance API to capture raw trade events. 
-- **Concurrency Model:** Utilizes non-blocking I/O to handle high-frequency event bursts.
-- **Serialization:** Maps raw JSON responses to high-performance Java DTOs before publishing to the message broker.
+The system follows a producer-consumer pattern decoupled by a message broker, ensuring scalability and resilience against backpressure.
 
-### 2.2. Messaging Backbone (Apache Kafka)
-Kafka acts as the distributed commit log and message broker, ensuring zero data loss and providing a buffer between the high-speed ingestion and the analytical processing units.
-- **Fault Tolerance:** Configured within the Kubernetes cluster to ensure high availability.
-- **Scalability:** Decouples the producers from consumers, allowing independent scaling of the analytics engine.
+### 1. Data Ingestion Layer (Producer)
+- **Source:** Binance WebSocket API.
+- **Mechanism:** Asynchronous Python client (aiohttp) establishes a persistent connection to the btcusdt@trade stream.
+- **Serialization:** Raw JSON payloads are serialized into bytes and pushed to the Kafka topic 'trade-events'.
+- **Fault Tolerance:** Implements automatic reconnection logic with exponential backoff strategies for WebSocket stability.
 
-### 2.3. Analytics and Visualization (Analytics-Engine)
-The processing layer is a Python-based engine that consumes trade events and performs window-based quantitative analysis.
-- **Processing Engine:** Leverages Pandas and SciPy for vectorized statistical operations.
-- **Dynamic UI:** A Streamlit-based dashboard provides real-time visualization of market trends using Plotly's hardware-accelerated rendering.
+### 2. Message Broker Layer (Kafka)
+- **Topic:** trade-events
+- **Configuration:** Single-node Kafka broker deployed via Bitnami Helm charts on Kubernetes.
+- **Retention Policy:** Configured for high-throughput, short-retention bursts to optimize storage for real-time analysis.
 
-### 2.4. Orchestration Layer (Kubernetes)
-The entire stack is deployed on a Kubernetes cluster (Minikube), providing:
-- **Service Discovery:** Automatic internal networking between Kafka, Java, and Python pods.
-- **Resource Management:** Optimized for high-performance "Nitro" hardware environments to ensure stable processing under load.
+### 3. Analytics and Visualization Engine (Consumer)
+- **Framework:** Streamlit (Python).
+- **Consumer Logic:** kafka-python library creates a consumer group (dashboard-group) to read messages.
+- **Rendering Optimization:**
+  - Utilizes the '@st.fragment' decorator to isolate chart component updates.
+  - Prevents full-page re-renders, reducing CPU/Memory usage significantly.
+  - Eliminates "DuplicateElementId" errors by managing component lifecycles independently.
+- **Data Buffer:** A rolling window buffer (circular queue) retains the last N data points for plotting, ensuring O(1) memory complexity.
 
+## Tech Stack and Key Decisions
 
+| Component | Technology | Rationale |
+|-----------|------------|-----------|
+| **Orchestration** | Kubernetes (Minikube) | Provides self-healing pods, service discovery, and declarative infrastructure. |
+| **Streaming** | Apache Kafka | Decouples producers/consumers, handles backpressure, and ensures exactly-once delivery semantics. |
+| **Visualization** | Streamlit + Plotly | Enables rapid prototyping. Plotly provides hardware-accelerated SVG/WebGL charts. |
+| **Language** | Python 3.11 | Extensive ecosystem for data engineering (pandas, numpy) and network programming. |
 
-## 3. Quantitative Methodology
+## Installation and Deployment
 
-The engine applies rigorous statistical frameworks to raw price data to extract actionable market intelligence:
+This project uses a Makefile to abstract complex Docker and Kubernetes commands into simple verbs.
 
-### 3.1. Linear Regression Momentum
-By applying the Method of Least Squares over a rolling window of $n$ samples, the engine calculates the slope ($m$) to identify trend direction:
-$$y = mx + b$$
-A positive slope indicates bullish momentum, while a negative slope suggests a bearish trend within the specified time horizon.
+### Prerequisites
+- Docker
+- Minikube
+- kubectl
 
-### 3.2. Statistical Anomaly Detection (Z-Score)
-To quantify price deviations and identify potential mean-reversion opportunities, the system calculates the Z-Score for every incoming tick:
-$$Z = \frac{x - \mu}{\sigma}$$
-- **$x$:** Current market price.
-- **$\mu$:** Rolling arithmetic mean of the window.
-- **$\sigma$:** Rolling standard deviation, representing market volatility.
+### Quick Start Workflow
 
-## 4. Technical Specifications
+1. **Initialize the Environment**
+   This command cleans legacy resources, builds the Docker image (using cache for speed), applies Kubernetes manifests, and waits for pod readiness.
 
-- **Languages:** Java 17, Python 3.10
-- **Streaming:** Apache Kafka (Confluent Distribution)
-- **Containerization:** Docker (Multi-stage builds)
-- **Orchestration:** Kubernetes (v1.28+)
-- **Analysis:** NumPy, Pandas, SciPy, Statsmodels
-- **Visualization:** Streamlit, Plotly (Real-time WebSockets)
+   make setup
 
-## 5. Deployment and Operational Commands
+2. **Access the Dashboard**
+   Establishes a secure tunnel from the Kubernetes cluster to localhost.
 
-The project is equipped with a Makefile to standardize operational workflows and minimize human error during deployment:
+   make tunnel
 
-### 5.1. Environment Initialization
-Ensure the local shell is pointed to the Minikube Docker daemon:
-`eval $(minikube docker-env)`
+   > Access the UI at: http://localhost:8501
 
-### 5.2. Automated Build and Deployment
-Build all microservices and apply Kubernetes manifests:
-`make build-all && make deploy`
+3. **Monitor Logs**
+   View real-time ingestion and processing logs.
 
-### 5.3. Service Exposure
-Expose the analytical dashboard to the host machine:
-`make service`
+   make logs
 
-## 6. Project Roadmap
-- **Phase 1:** Implementation of GARCH models for advanced volatility forecasting.
-- **Phase 2:** Integration of Horizontal Pod Autoscaler (HPA) to manage CPU spikes during high-volatility events.
-- **Phase 3:** Persistence layer integration (TimescaleDB) for historical backtesting.
+4. **Clean Up**
+   Remove all resources and kill background port forwarding processes.
+
+   make clean
+
+## Project Structure
+
+.
+├── analytics-engine/       # Microservice: Dashboard and Consumer
+│   ├── Dockerfile          # Multi-stage build for Python env
+│   ├── dashboard.py        # Streamlit app with Fragment architecture
+│   ├── entrypoint.sh       # Smart startup script with Kafka health checks
+│   └── requirements.txt    # Python dependencies
+├── k8s/                    # Infrastructure as Code (IaC)
+│   └── apps.yaml           # Deployment and Service definitions
+├── Makefile                # Automation scripts
+└── README.md               # Documentation
+
+## Troubleshooting and Resilience Implementation
+
+### Zombie Process Handling
+The Makefile includes aggressive cleanup routines (using fuser and pkill) to terminate orphaned processes on port 8501, resolving common ADDRINUSE errors during development iterations.
+
+### Kafka Connection Reliability
+The entrypoint.sh script implements a "wait-for-it" pattern. It polls the Kafka service availability using raw sockets before starting the Streamlit application, preventing the "CrashLoopBackOff" state caused by race conditions.
+
+### Memory Optimization
+By switching from st.rerun() to @st.fragment, the application avoids the memory ballooning associated with full-script re-execution loops in Streamlit, ensuring stability over long-running sessions.
 
 ---
-**Developer:** Mahmut Karabulut
-**Affiliation:** Ege University, Computer Engineering
-**Specialization:** Data Science and AI Engineering (1.5+ Years Experience)
+**Author:** Mahmut
+**License:** MIT
