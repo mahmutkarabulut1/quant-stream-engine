@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: data-collector
+  template:
+    metadata:
+      labels:
+        app: data-collector
+    spec:
+      containers:
+      - name: data-collector
+        image: mahmut/data-collector:v1
+        imagePullPolicy: Never
+        env:
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          value: "kafka-service:9092"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: analytics-engine
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: analytics-engine
+  template:
+    metadata:
+      labels:
+        app: analytics-engine
+    spec:
+      containers:
+      - name: analytics-engine
+        image: mahmut/analytics-engine:v1
+        imagePullPolicy: Never
+        command: ["python", "analyzer.py"]
+        env:
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          value: "kafka-service:9092"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dashboard-engine
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dashboard-engine
+  template:
+    metadata:
+      labels:
+        app: dashboard-engine
+    spec:
+      containers:
+      - name: dashboard-engine
+        image: mahmut/analytics-engine:v1
+        imagePullPolicy: Never
+        command: ["streamlit", "run", "dashboard.py", "--server.port=8501", "--server.address=0.0.0.0"]
+        env:
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          value: "kafka-service:9092"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dashboard-service
+spec:
+  type: NodePort
+  ports:
+  - port: 8501
+    targetPort: 8501
+    nodePort: 30001
+  selector:
+    app: dashboard-engine

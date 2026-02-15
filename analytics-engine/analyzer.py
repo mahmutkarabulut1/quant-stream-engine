@@ -1,104 +1,83 @@
+import os
 import json
 import numpy as np
 from kafka import KafkaConsumer
 from datetime import datetime
 from collections import deque
+from scipy import stats
 
-# Kafka Configuration
+# Configuration with Kubernetes Support
+KAFKA_URL = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka-service:9092')
 TOPIC_NAME = 'trade-events'
-BOOTSTRAP_SERVERS = ['localhost:9092']
+WINDOW_SIZE = 100
 
-# Financial Parameters
-WINDOW_SIZE = 50       # Number of data points to keep for analysis
-RSI_PERIOD = 14        # Period for RSI calculation
-SMA_PERIOD = 20        # Period for Simple Moving Average
-
-class FinancialAnalyzer:
+class QuantPatternAnalyzer:
     def __init__(self):
-        # Efficient queue to store the last N prices
         self.prices = deque(maxlen=WINDOW_SIZE)
+        self.volumes = deque(maxlen=WINDOW_SIZE)
 
-    def add_price(self, price):
+    def add_data(self, price, volume):
         self.prices.append(price)
+        self.volumes.append(volume)
 
-    def calculate_sma(self):
-        if len(self.prices) < SMA_PERIOD:
-            return None
-        # Calculate Simple Moving Average of the last N items
-        return np.mean(list(self.prices)[-SMA_PERIOD:])
+    def detect_patterns(self):
+        if len(self.prices) < WINDOW_SIZE:
+            return "DATA_COLLECTION_MODE"
 
-    def calculate_rsi(self):
-        if len(self.prices) < RSI_PERIOD + 1:
-            return None
-
-        prices_list = list(self.prices)[-(RSI_PERIOD+1):]
-        deltas = np.diff(prices_list)
+        price_arr = np.array(self.prices)
         
-        gains = deltas[deltas > 0]
-        losses = -deltas[deltas < 0]
+        # Volatility Analysis using Z-Score: Z = (x - mu) / sigma
+        z_scores = stats.zscore(price_arr)
+        current_z = z_scores[-1]
 
-        avg_gain = np.mean(gains) if len(gains) > 0 else 0
-        avg_loss = np.mean(losses) if len(losses) > 0 else 0
+        # Trend Analysis using Linear Regression Slope
+        x_axis = np.arange(len(price_arr))
+        slope, intercept, r_value, p_value, std_err = stats.linregress(x_axis, price_arr)
 
-        if avg_loss == 0:
-            return 100.0
-        
-        rs = avg_gain / avg_loss
-        rsi = 100.0 - (100.0 / (1.0 + rs))
-        return rsi
-
-    def get_signal(self, rsi):
-        if rsi is None:
-            return "WAITING"
-        if rsi < 30:
-            return "OVERSOLD (BUY)"
-        elif rsi > 70:
-            return "OVERBOUGHT (SELL)"
-        else:
-            return "NEUTRAL"
+        pattern = "STABLE"
+        if current_z > 2.0 and slope > 0.01:
+            pattern = "BULLISH_BREAKOUT"
+        elif current_z < -2.0 and slope < -0.01:
+            pattern = "BEARISH_BREAKOUT"
+        elif abs(slope) < 0.001:
+            pattern = "CONSOLIDATION"
+            
+        return {
+            "pattern": pattern,
+            "slope": slope,
+            "z_score": current_z,
+            "confidence": r_value**2
+        }
 
 def start_engine():
-    print(">>> Starting Quantitative Analytics Engine...")
-    print(">>> Connecting to Kafka...")
-
+    print(f"Connecting to Kafka at: {KAFKA_URL}")
+    
+    analyzer = QuantPatternAnalyzer()
+    
     try:
         consumer = KafkaConsumer(
             TOPIC_NAME,
-            bootstrap_servers=BOOTSTRAP_SERVERS,
+            bootstrap_servers=[KAFKA_URL],
             auto_offset_reset='latest',
             value_deserializer=lambda x: json.loads(x.decode('utf-8'))
         )
-        
-        analyzer = FinancialAnalyzer()
-
-        print(f">>> Connection successful. Analyzing real-time trade data...")
-        print(">>> Collecting initial data for indicators (need 20+ trades)...")
 
         for message in consumer:
-            trade_data = message.value
+            data = message.value
+            price = float(data['p'])
+            volume = float(data['q'])
             
-            # Extract Data
-            current_price = float(trade_data['p'])
-            timestamp = int(trade_data['T']) / 1000
-            human_time = datetime.fromtimestamp(timestamp).strftime('%H:%M:%S')
+            analyzer.add_data(price, volume)
+            results = analyzer.detect_patterns()
 
-            # Add to analyzer
-            analyzer.add_price(current_price)
-
-            # Calculate Indicators
-            sma = analyzer.calculate_sma()
-            rsi = analyzer.calculate_rsi()
-            signal = analyzer.get_signal(rsi)
-
-            # Formatting Output
-            sma_str = f"{sma:.2f}" if sma else "CALCULATING..."
-            rsi_str = f"{rsi:.2f}" if rsi else "CALCULATING..."
-            
-            # Print tabular hard data
-            print(f"[{human_time}] Price: {current_price:.2f} | SMA({SMA_PERIOD}): {sma_str} | RSI({RSI_PERIOD}): {rsi_str} | Signal: {signal}")
+            if isinstance(results, dict):
+                timestamp = datetime.now().strftime('%H:%M:%S')
+                print(f"[{timestamp}] PRICE: {price:.2f} | PATTERN: {results['pattern']} | SLOPE: {results['slope']:.4f} | CONF: {results['confidence']:.2f}")
+            else:
+                print(f"Status: {results} - Progress: {len(analyzer.prices)}/{WINDOW_SIZE}")
 
     except Exception as e:
-        print(f">>> Error: {e}")
+        print(f"Critical Error: {e}")
 
 if __name__ == "__main__":
     start_engine()
