@@ -1,3 +1,8 @@
+#!/bin/bash
+set -e
+
+# Update dashboard.py with English-only code and no emojis
+cat << 'EOF_PY' > analytics-engine/dashboard.py
 import os
 import time
 import json
@@ -10,53 +15,30 @@ from datetime import datetime
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
 
-# Page Configuration
+# --- Page Config ---
 st.set_page_config(page_title="QuantStream AI", layout="wide")
 st.title("BTC/USDT AI-POWERED ANALYTICS")
 
-# Professional UI Styling
+# --- Custom CSS for Report UI ---
 st.markdown("""
     <style>
     .report-box {
-        background-color: #0E1117;
-        padding: 25px;
-        border-radius: 12px;
-        border: 1px solid #30363d;
-        border-left: 6px solid #00ff88;
-        margin-top: 25px;
-        color: #E6EDF3;
+        background-color: #1E1E1E;
+        padding: 20px;
+        border-radius: 10px;
+        border-left: 5px solid #00ff88;
+        margin-top: 20px;
     }
     .report-title {
         color: #00ff88;
-        font-size: 24px;
-        font-weight: 700;
-        margin-bottom: 15px;
+        font-size: 20px;
+        font-weight: bold;
+        margin-bottom: 10px;
     }
-    .report-item {
-        margin-bottom: 12px;
-        font-size: 16px;
-        line-height: 1.6;
-        color: #C9D1D9;
-    }
-    .label {
-        color: #8B949E;
-        font-weight: 500;
-        margin-right: 5px;
-    }
-    .value {
-        color: #FFFFFF;
-        font-weight: 600;
-    }
-    .signal-buy { color: #00ff88; font-weight: 800; }
-    .signal-sell { color: #FF4B4B; font-weight: 800; }
-    .signal-neutral { color: #FFD700; font-weight: 800; }
-    .risk-high { color: #FF4B4B; font-weight: 800; }
-    .risk-medium { color: #FFA500; font-weight: 800; }
-    .risk-low { color: #00FF88; font-weight: 800; }
     </style>
 """, unsafe_allow_html=True)
 
-# Kafka Connection
+# --- Kafka Consumer ---
 @st.cache_resource
 def get_kafka_consumer():
     KAFKA_URL = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka-service:9092')
@@ -67,25 +49,32 @@ def get_kafka_consumer():
             auto_offset_reset='earliest',
             value_deserializer=lambda x: json.loads(x.decode('utf-8')),
             consumer_timeout_ms=1000,
-            group_id="ai-dashboard-v4"
+            group_id="ai-dashboard-v2"
         )
     except Exception as e:
         st.error(f"Kafka Connection Error: {e}")
         return None
 
-# Analysis Functions
+# --- Indicator Calculations ---
 def calculate_indicators(df):
     if len(df) < 20: return df
+    
+    # Bollinger Bands
     df['SMA_20'] = df['price'].rolling(window=20).mean()
     df['StdDev'] = df['price'].rolling(window=20).std()
     df['Upper_Band'] = df['SMA_20'] + (df['StdDev'] * 2)
     df['Lower_Band'] = df['SMA_20'] - (df['StdDev'] * 2)
+    
+    # RSI
     delta = df['price'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
+    
+    # VWAP
     df['VWAP'] = (df['price'] * df['quantity']).cumsum() / df['quantity'].cumsum()
+    
     return df
 
 def run_anomaly_detection(df):
@@ -97,67 +86,68 @@ def run_anomaly_detection(df):
     df['anomaly'] = model.fit_predict(scaled_data)
     return df
 
-# Market Report and Risk Engine
+# --- Market Analysis Engine ---
 def generate_market_report(df):
-    if len(df) < 50: return "Insufficient data for detailed analysis."
+    if len(df) < 50: return "Insufficient data for market analysis."
     
     last_price = df['price'].iloc[-1]
+    first_price = df['price'].iloc[0]
+    price_change = ((last_price - first_price) / first_price) * 100
+    
     rsi = df['RSI'].iloc[-1]
-    vwap = df['VWAP'].iloc[-1]
-    std_dev = df['StdDev'].iloc[-1]
+    volatility = df['StdDev'].iloc[-1]
     anomalies = df[df['anomaly'] == -1].shape[0] if 'anomaly' in df.columns else 0
     
-    # Risk Score Calculation
-    # Factor 1: Anomalies (Max 40 pts)
-    anomaly_risk = min(40, anomalies * 2)
-    # Factor 2: Volatility relative to price (Max 30 pts)
-    vol_risk = min(30, (std_dev / last_price) * 10000)
-    # Factor 3: RSI Extremes (Max 20 pts)
-    rsi_risk = 20 if (rsi > 70 or rsi < 30) else 0
+    trend = "SIDEWAYS"
+    if price_change > 0.05: trend = "BULLISH"
+    elif price_change < -0.05: trend = "BEARISH"
     
-    total_risk = min(100, anomaly_risk + vol_risk + rsi_risk + 10)
+    rsi_comment = "Neutral momentum."
+    if rsi > 70: rsi_comment = "Market is OVERBOUGHT. Potential pullback expected."
+    elif rsi < 30: rsi_comment = "Market is OVERSOLD. Potential rebound expected."
     
-    if total_risk > 70: risk_status, r_class = "CRITICAL", "risk-high"
-    elif total_risk > 40: risk_status, r_class = "ELEVATED", "risk-medium"
-    else: risk_status, r_class = "STABLE", "risk-low"
-
-    # Trade Signals
-    if rsi < 35: rec, s_class = "STRONG BUY", "signal-buy"
-    elif rsi > 65: rec, s_class = "STRONG SELL", "signal-sell"
-    else: rec, s_class = "NEUTRAL / WAIT", "signal-neutral"
-
-    return f"""
+    vol_comment = "Market volatility is stable."
+    if volatility > df['price'].mean() * 0.001:
+        vol_comment = "High volatility detected. Exercise caution."
+        
+    report = f"""
     <div class='report-box'>
-        <div class='report-title'>Market Intelligence and Risk Analysis</div>
-        <div class='report-item'><span class='label'>Market Risk Score:</span> <span class='{r_class}'>{total_risk:.0f}/100 ({risk_status})</span></div>
-        <div class='report-item'><span class='label'>AI Action Signal:</span> <span class='{s_class}'>{rec}</span></div>
-        <div class='report-item'><span class='label'>Trend Status:</span> <span class='value'>Price is {"Above" if last_price > vwap else "Below"} VWAP Trend</span></div>
-        <div class='report-item'><span class='label'>Volatility Index:</span> <span class='value'>{std_dev:.2f} (Based on StdDev)</span></div>
-        <div class='report-item'><span class='label'>Anomalous Events:</span> <span class='value'>{anomalies} Patterns Detected</span></div>
-        <div style='margin-top: 15px; color: #8B949E; font-size: 12px; font-style: italic;'>
-            Analysis Engine Refresh: {datetime.now().strftime('%H:%M:%S')}
-        </div>
+        <div class='report-title'>Market Intelligence Report (5-Min Summary)</div>
+        <ul>
+            <li><b>Trend Analysis:</b> The market trend is <b>{trend}</b> with a {price_change:.3f}% price change.</li>
+            <li><b>Momentum (RSI):</b> RSI is at {rsi:.1f}. {rsi_comment}</li>
+            <li><b>Volatility and Risk:</b> {vol_comment} (StdDev: {volatility:.2f}).</li>
+            <li><b>AI Anomaly Scan:</b> Detected <b>{anomalies}</b> anomalous trade patterns in current window.</li>
+            <li><b>VWAP Signal:</b> Price is {"ABOVE" if last_price > df['VWAP'].iloc[-1] else "BELOW"} the volume-weighted average price.</li>
+        </ul>
+        <small><i>Report Generated at: {datetime.now().strftime('%H:%M:%S')}</i></small>
     </div>
     """
+    return report
 
-# Buffer Initialization
+# --- State Management ---
 if 'buffer' not in st.session_state:
     st.session_state.buffer = []
 if 'last_report_time' not in st.session_state:
     st.session_state.last_report_time = 0
 if 'latest_report' not in st.session_state:
-    st.session_state.latest_report = "Initializing Risk Engine. Data collection in progress..."
+    st.session_state.latest_report = "Waiting for data cycle to complete (5 minutes)..."
 
-# Main Dashboard Fragment
+# --- Real-Time Dashboard Fragment ---
 @st.fragment(run_every=1)
 def analytics_dashboard():
     consumer = get_kafka_consumer()
     if not consumer: return
+
     msg_pack = consumer.poll(timeout_ms=500)
     for tp, messages in msg_pack.items():
         for msg in messages:
             trade = msg.value
-            st.session_state.buffer.append({"time": datetime.now(), "price": float(trade.get('p', 0)), "quantity": float(trade.get('q', 0))})
+            st.session_state.buffer.append({
+                "time": datetime.now(),
+                "price": float(trade.get('p', 0)),
+                "quantity": float(trade.get('q', 0))
+            })
 
     if len(st.session_state.buffer) > 500:
         st.session_state.buffer = st.session_state.buffer[-500:]
@@ -167,13 +157,14 @@ def analytics_dashboard():
         df = calculate_indicators(df)
         df = run_anomaly_detection(df)
         
+        # 5-Minute Report Update Trigger
         current_time = time.time()
         if current_time - st.session_state.last_report_time > 300:
             st.session_state.latest_report = generate_market_report(df)
             st.session_state.last_report_time = current_time
 
-        # Plotly Charts
         col1, col2 = st.columns(2)
+        
         with col1:
             st.subheader("Price and Bollinger Bands")
             fig1 = go.Figure()
@@ -182,6 +173,7 @@ def analytics_dashboard():
             fig1.add_trace(go.Scatter(x=df['time'], y=df['Lower_Band'], name='Lower BB', line=dict(color='gray', dash='dash'), fill='tonexty'))
             fig1.update_layout(template="plotly_dark", height=300, margin=dict(l=0,r=0,t=30,b=0))
             st.plotly_chart(fig1, use_container_width=True)
+
         with col2:
             st.subheader("RSI Momentum")
             fig2 = go.Figure(go.Scatter(x=df['time'], y=df['RSI'], name='RSI', line=dict(color='#00ccff')))
@@ -191,6 +183,7 @@ def analytics_dashboard():
             st.plotly_chart(fig2, use_container_width=True)
 
         col3, col4 = st.columns(2)
+
         with col3:
             st.subheader("VWAP Trend")
             fig3 = go.Figure()
@@ -198,6 +191,7 @@ def analytics_dashboard():
             fig3.add_trace(go.Scatter(x=df['time'], y=df['VWAP'], name='VWAP', line=dict(color='#ffa500', width=2)))
             fig3.update_layout(template="plotly_dark", height=300, margin=dict(l=0,r=0,t=30,b=0))
             st.plotly_chart(fig3, use_container_width=True)
+
         with col4:
             st.subheader("AI Anomaly Detection")
             fig4 = go.Figure()
@@ -211,6 +205,12 @@ def analytics_dashboard():
 
         st.markdown(st.session_state.latest_report, unsafe_allow_html=True)
     else:
-        st.info("Gathering market data for risk calculation...")
+        st.info("Gathering data for initial analysis...")
 
 analytics_dashboard()
+EOF_PY
+
+eval $(minikube docker-env)
+docker build --no-cache -t mahmut/analytics-engine:v1 ./analytics-engine
+kubectl delete pod -l app=dashboard-engine
+kubectl wait --for=condition=ready pod -l app=dashboard-engine --timeout=120s

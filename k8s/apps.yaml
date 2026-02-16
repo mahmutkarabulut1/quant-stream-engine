@@ -15,24 +15,12 @@ spec:
       containers:
       - name: dashboard-engine
         image: mahmut/analytics-engine:v1
+        imagePullPolicy: Never
         ports:
         - containerPort: 8501
         env:
         - name: KAFKA_BOOTSTRAP_SERVERS
           value: "kafka-service:9092"
-        # SISTEMIN YIKILMAZ OLMASINI SAGLAYAN KISIM
-        livenessProbe:
-          tcpSocket:
-            port: 8501
-          initialDelaySeconds: 30
-          periodSeconds: 10
-        readinessProbe:
-          httpGet:
-            path: /_stcore/health
-            port: 8501
-          initialDelaySeconds: 10
-          periodSeconds: 5
-        command: ["/bin/bash", "entrypoint.sh"]
 ---
 apiVersion: v1
 kind: Service
