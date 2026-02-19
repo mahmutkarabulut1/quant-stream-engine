@@ -1,0 +1,80 @@
+version: '3.8'
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.3.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - quant-network
+
+  kafka-service:
+    image: confluentinc/cp-kafka:7.3.0
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-service:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    networks:
+      - quant-network
+
+  streamer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "streamer.py"]
+    depends_on:
+      - kafka-service
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka-service:9092
+    networks:
+      - quant-network
+
+  predictor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "prediction-engine/predictor.py"]
+    depends_on:
+      - kafka-service
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka-service:9092
+    networks:
+      - quant-network
+
+  evaluator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "prediction-engine/evaluator.py"]
+    depends_on:
+      - kafka-service
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka-service:9092
+    volumes:
+      - ./prediction-engine:/app/prediction-engine
+    networks:
+      - quant-network
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["streamlit", "run", "dashboard.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    ports:
+      - "8501:8501"
+    depends_on:
+      - kafka-service
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka-service:9092
+    networks:
+      - quant-network
+
+networks:
+  quant-network:
+    driver: bridge

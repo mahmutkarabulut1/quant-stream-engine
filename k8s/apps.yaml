@@ -16,6 +16,7 @@ spec:
       - name: dashboard-engine
         image: mahmut/analytics-engine:v1
         imagePullPolicy: Never
+        command: ["streamlit", "run", "dashboard.py", "--server.port=8501", "--server.address=0.0.0.0"]
         ports:
         - containerPort: 8501
         env:
@@ -34,3 +35,72 @@ spec:
       port: 8501
       targetPort: 8501
   type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: streamer-engine
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: streamer-engine
+  template:
+    metadata:
+      labels:
+        app: streamer-engine
+    spec:
+      containers:
+      - name: streamer-engine
+        image: mahmut/analytics-engine:v1
+        imagePullPolicy: Never
+        command: ["python", "streamer.py"]
+        env:
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          value: "kafka-service:9092"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: predictor-engine
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: predictor-engine
+  template:
+    metadata:
+      labels:
+        app: predictor-engine
+    spec:
+      containers:
+      - name: predictor-engine
+        image: mahmut/analytics-engine:v1
+        imagePullPolicy: Never
+        command: ["python", "prediction-engine/predictor.py"]
+        env:
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          value: "kafka-service:9092"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: evaluator-engine
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: evaluator-engine
+  template:
+    metadata:
+      labels:
+        app: evaluator-engine
+    spec:
+      containers:
+      - name: evaluator-engine
+        image: mahmut/analytics-engine:v1
+        imagePullPolicy: Never
+        command: ["python", "prediction-engine/evaluator.py"]
+        env:
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          value: "kafka-service:9092"

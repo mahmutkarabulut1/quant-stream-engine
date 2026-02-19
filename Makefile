@@ -5,7 +5,7 @@ PORT := 8501
 APP_LABEL := app=dashboard-engine
 SERVICE_NAME := svc/dashboard-service
 
-.PHONY: all setup check-network clean build deploy wait tunnel logs help
+.PHONY: all setup check-network clean build deploy wait tunnel logs logs-streamer logs-ai logs-eval help
 
 # Default target
 all: help
@@ -14,7 +14,7 @@ all: help
 
 setup: check-network clean build deploy wait
 	@echo "---------------------------------------------------"
-	@echo "SYSTEM READY."
+	@echo "SYSTEM READY. HYBRID AI ENGINE DEPLOYED."
 	@echo "---------------------------------------------------"
 	@echo "Run 'make tunnel' to access the dashboard."
 
@@ -23,7 +23,8 @@ setup: check-network clean build deploy wait
 # 0. Network Check (Self-Healing)
 check-network:
 	@echo "Checking Kubernetes cluster connectivity..."
-	@kubectl get nodes > /dev/null 2>&1 || (echo "Minikube is stopped or IP changed. Restarting Minikube..." && minikube start)
+	@kubectl get nodes > /dev/null 2>&1 || \
+	(echo "Minikube is stopped or IP changed. Restarting Minikube..." && minikube start)
 
 # 1. Clean Resources
 clean:
@@ -46,7 +47,7 @@ deploy:
 
 # 4. Wait for Readiness
 wait:
-	@echo "Waiting for pod to be ready (timeout: 120s)..."
+	@echo "Waiting for dashboard pod to be ready (timeout: 120s)..."
 	kubectl wait --for=condition=ready pod -l $(APP_LABEL) --timeout=120s
 
 # 5. Port Forwarding
@@ -55,14 +56,30 @@ tunnel:
 	@echo "Access here: http://localhost:$(PORT)"
 	kubectl port-forward $(SERVICE_NAME) $(PORT):$(PORT)
 
-# --- UTILITIES ---
+# --- UTILITIES (AI MICROSERVICES) ---
 
 logs:
+	@echo "Showing Dashboard logs..."
 	kubectl logs -l $(APP_LABEL) -f
+
+logs-streamer:
+	@echo "Showing Streamer logs..."
+	kubectl logs -l app=streamer-engine -f
+
+logs-ai:
+	@echo "Showing AI Predictor logs..."
+	kubectl logs -l app=predictor-engine -f
+
+logs-eval:
+	@echo "Showing AI Evaluator logs..."
+	kubectl logs -l app=evaluator-engine -f
 
 help:
 	@echo "Available commands:"
-	@echo "  make setup   - Fix network, build, clean, deploy and wait."
-	@echo "  make tunnel  - Start port forwarding to access the site."
-	@echo "  make logs    - View real-time logs."
-	@echo "  make clean   - Remove all resources."
+	@echo "  make setup         - Fix network, build, clean, deploy and wait."
+	@echo "  make tunnel        - Start port forwarding to access the site."
+	@echo "  make clean         - Remove all resources."
+	@echo "  make logs          - View Dashboard logs."
+	@echo "  make logs-streamer - View Data Streamer logs."
+	@echo "  make logs-ai       - View AI Predictor logs."
+	@echo "  make logs-eval     - View AI Evaluator logs."
