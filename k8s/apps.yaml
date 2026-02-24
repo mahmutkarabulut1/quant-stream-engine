@@ -1,60 +1,52 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: dashboard-engine
+  name: data-collector-engine
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: dashboard-engine
+      app: data-collector-engine
   template:
     metadata:
       labels:
-        app: dashboard-engine
+        app: data-collector-engine
     spec:
+      initContainers:
+      - name: wait-for-kafka
+        image: busybox
+        command: ['sh', '-c', 'until nc -z kafka-service 9092; do echo waiting for kafka; sleep 2; done;']
       containers:
-      - name: dashboard-engine
-        image: mahmut/analytics-engine:v1
+      - name: data-collector
+        image: mahmut/data-collector:v1
         imagePullPolicy: Never
-        command: ["streamlit", "run", "dashboard.py", "--server.port=8501", "--server.address=0.0.0.0"]
-        ports:
-        - containerPort: 8501
         env:
         - name: KAFKA_BOOTSTRAP_SERVERS
           value: "kafka-service:9092"
 ---
-apiVersion: v1
-kind: Service
-metadata:
-  name: dashboard-service
-spec:
-  selector:
-    app: dashboard-engine
-  ports:
-    - protocol: TCP
-      port: 8501
-      targetPort: 8501
-  type: ClusterIP
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: streamer-engine
+  name: aggregator-engine
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: streamer-engine
+      app: aggregator-engine
   template:
     metadata:
       labels:
-        app: streamer-engine
+        app: aggregator-engine
     spec:
+      initContainers:
+      - name: wait-for-kafka
+        image: busybox
+        command: ['sh', '-c', 'until nc -z kafka-service 9092; do echo waiting for kafka; sleep 2; done;']
       containers:
-      - name: streamer-engine
+      - name: aggregator
         image: mahmut/analytics-engine:v1
         imagePullPolicy: Never
-        command: ["python", "streamer.py"]
+        command: ["python", "aggregator.py"]
         env:
         - name: KAFKA_BOOTSTRAP_SERVERS
           value: "kafka-service:9092"
@@ -73,8 +65,12 @@ spec:
       labels:
         app: predictor-engine
     spec:
+      initContainers:
+      - name: wait-for-kafka
+        image: busybox
+        command: ['sh', '-c', 'until nc -z kafka-service 9092; do echo waiting for kafka; sleep 2; done;']
       containers:
-      - name: predictor-engine
+      - name: predictor
         image: mahmut/analytics-engine:v1
         imagePullPolicy: Never
         command: ["python", "prediction-engine/predictor.py"]
@@ -85,22 +81,37 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: evaluator-engine
+  name: dashboard-engine
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: evaluator-engine
+      app: dashboard-engine
   template:
     metadata:
       labels:
-        app: evaluator-engine
+        app: dashboard-engine
     spec:
       containers:
-      - name: evaluator-engine
+      - name: dashboard
         image: mahmut/analytics-engine:v1
         imagePullPolicy: Never
-        command: ["python", "prediction-engine/evaluator.py"]
+        command: ["streamlit", "run", "dashboard.py", "--server.port=8501", "--server.address=0.0.0.0"]
+        ports:
+        - containerPort: 8501
         env:
         - name: KAFKA_BOOTSTRAP_SERVERS
           value: "kafka-service:9092"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dashboard-service
+spec:
+  type: NodePort
+  selector:
+    app: dashboard-engine
+  ports:
+  - port: 8501
+    targetPort: 8501
+    nodePort: 30501

@@ -1,0 +1,934 @@
+==========================================================
+PROJECT STRUCTURE
+==========================================================
+.
+ |-- update_ui.sh
+ |-- data-collector
+ |  |-- mvnw.cmd
+ |  |-- src
+ |  |  |-- test
+ |  |  |  |-- java
+ |  |  |-- main
+ |  |  |  |-- java
+ |  |  |  |-- resources
+ |  |-- mvnw
+ |  |-- Dockerfile
+ |  |-- pom.xml
+ |  |-- HELP.md
+ |-- project_summary.txt
+ |-- final_fix.sh
+ |-- k8s
+ |  |-- kafka.yaml
+ |  |-- apps.yaml
+ |-- analytics-engine
+ |  |-- aggregator.py
+ |  |-- Dockerfile
+ |  |-- dashboard.py
+ |  |-- prediction-engine
+ |  |  |-- predictor.py
+ |  |  |-- evaluator.py
+ |  |-- requirements.txt
+ |  |-- entrypoint.sh
+ |  |-- streamer.py
+ |-- infra
+ |  |-- docker-compose.yaml
+ |-- docker-compose.yml
+ |-- Makefile
+ |-- setup.sh
+ |-- README.md
+ |-- project_status.txt
+ |-- fix_system.sh
+
+==========================================================
+FILE CONTENTS
+==========================================================
+
+--- START OF FILE: ./data-collector/Dockerfile ---
+FROM maven:3.9.6-eclipse-temurin-17 AS build
+WORKDIR /app
+COPY . .
+RUN mvn clean package -DskipTests
+
+FROM eclipse-temurin:17-jre-jammy
+WORKDIR /app
+COPY --from=build /app/target/*.jar app.jar
+ENTRYPOINT ["java", "-jar", "app.jar"]
+
+--- END OF FILE: ./data-collector/Dockerfile ---
+
+--- START OF FILE: ./data-collector/pom.xml ---
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.2.3</version>
+        <relativePath/> </parent>
+    
+    <groupId>com.quantstream</groupId>
+    <artifactId>data-collector</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+    <name>Data Collector Service</name>
+    <description>Real-time Market Data Ingestion Service for Quant Stream Engine</description>
+    
+    <properties>
+        <java.version>21</java.version> </properties>
+    
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-websocket</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.kafka</groupId>
+            <artifactId>spring-kafka</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <optional>true</optional>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.kafka</groupId>
+            <artifactId>spring-kafka-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <excludes>
+                        <exclude>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                        </exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+
+</project>
+
+--- END OF FILE: ./data-collector/pom.xml ---
+
+--- START OF FILE: ./k8s/kafka.yaml ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-service
+spec:
+  ports:
+  - port: 9092
+  selector:
+    app: kafka
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka
+  template:
+    metadata:
+      labels:
+        app: kafka
+    spec:
+      containers:
+      - name: kafka
+        image: confluentinc/cp-kafka:7.4.0
+        env:
+        - name: KAFKA_BROKER_ID
+          value: "1"
+        - name: KAFKA_ZOOKEEPER_CONNECT
+          value: "zookeeper-service:2181" # Birazdan ekleyeceğiz
+        - name: KAFKA_ADVERTISED_LISTENERS
+          value: "PLAINTEXT://kafka-service:9092"
+        - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+          value: "1"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zookeeper-service
+spec:
+  ports:
+  - port: 2181
+  selector:
+    app: zookeeper
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zookeeper
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: zookeeper
+  template:
+    metadata:
+      labels:
+        app: zookeeper
+    spec:
+      containers:
+      - name: zookeeper
+        image: confluentinc/cp-zookeeper:7.4.0
+        env:
+        - name: ZOOKEEPER_CLIENT_PORT
+          value: "2181"
+
+--- END OF FILE: ./k8s/kafka.yaml ---
+
+--- START OF FILE: ./k8s/apps.yaml ---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-collector-engine
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: data-collector-engine
+  template:
+    metadata:
+      labels:
+        app: data-collector-engine
+    spec:
+      containers:
+      - name: data-collector
+        image: mahmut/data-collector:v1
+        imagePullPolicy: Never
+        env:
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          value: "kafka-service:9092"
+---
+# Python Aggregator, Predictor ve Dashboard kısımları aynen devam eder...
+
+--- END OF FILE: ./k8s/apps.yaml ---
+
+--- START OF FILE: ./analytics-engine/aggregator.py ---
+import os
+import json
+import pandas as pd
+from kafka import KafkaConsumer, KafkaProducer
+from datetime import datetime
+
+# Infrastructure Configuration
+KAFKA_BOOTSTRAP = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka-service:9092')
+INPUT_TOPIC = 'trade-events'
+OUTPUT_TOPIC = 'candle-events'
+
+class CandleAggregator:
+    def __init__(self, interval='1Min'):
+        self.interval = interval
+        self.buffer = []
+        self.producer = KafkaProducer(
+            bootstrap_servers=[KAFKA_BOOTSTRAP],
+            value_serializer=lambda v: json.dumps(v).encode('utf-8')
+        )
+
+    def run(self):
+        # Initializing consumer to read raw tick data
+        consumer = KafkaConsumer(
+            INPUT_TOPIC,
+            bootstrap_servers=[KAFKA_BOOTSTRAP],
+            value_deserializer=lambda x: json.loads(x.decode('utf-8'))
+        )
+
+        print(f"Aggregator Service Started: Generating {self.interval} candles...")
+
+        for message in consumer:
+            trade = message.value
+            
+            # Appending raw trade to the temporary buffer
+            self.buffer.append({
+                'timestamp': pd.to_datetime(trade['t'], unit='ms'),
+                'price': float(trade['p']),
+                'quantity': float(trade['q'])
+            })
+
+            # Process buffer periodically to maintain low latency
+            if len(self.buffer) > 100:
+                df = pd.DataFrame(self.buffer).set_index('timestamp')
+                
+                # Identify the last completed time interval
+                last_ts = df.index.max().floor(self.interval)
+                complete_trades = df[:last_ts - pd.Timedelta(seconds=1)]
+
+                if not complete_trades.empty:
+                    # Resampling logic: Converting ticks to OHLCV format
+                    ohlc = complete_trades['price'].resample(self.interval).ohlc()
+                    volume = complete_trades['quantity'].resample(self.interval).sum()
+                    
+                    for ts, row in ohlc.iterrows():
+                        candle = {
+                            'timestamp': int(ts.timestamp() * 1000),
+                            'open': row['open'],
+                            'high': row['high'],
+                            'low': row['low'],
+                            'close': row['close'],
+                            'volume': volume.loc[ts]
+                        }
+                        
+                        # Broadcasting the aggregated candle to the AI Engine
+                        self.producer.send(OUTPUT_TOPIC, candle)
+                        print(f"Candle Created: {ts} | Close: {candle['close']} | Vol: {candle['volume']}")
+
+                    # Retain only unprocessed data in the buffer
+                    self.buffer = [t for t in self.buffer if t['timestamp'] >= last_ts]
+
+if __name__ == "__main__":
+    aggregator = CandleAggregator(interval='1Min')
+    aggregator.run()
+--- END OF FILE: ./analytics-engine/aggregator.py ---
+
+--- START OF FILE: ./analytics-engine/Dockerfile ---
+FROM python:3.11-slim
+WORKDIR /app
+# Sadece requirements kopyala ve kur (Kod değişse bile bu katman cache'ten gelir)
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+# Kodları en son kopyala
+COPY . . 
+EXPOSE 8501
+
+--- END OF FILE: ./analytics-engine/Dockerfile ---
+
+--- START OF FILE: ./analytics-engine/dashboard.py ---
+import os
+import time
+import json
+import pandas as pd
+import numpy as np
+import streamlit as st
+import plotly.graph_objects as go
+from kafka import KafkaConsumer
+from datetime import datetime
+from sklearn.ensemble import IsolationForest
+from sklearn.preprocessing import StandardScaler
+
+# Page Configuration
+st.set_page_config(page_title="QuantStream Hybrid AI", layout="wide")
+st.title("BTC/USDT HYBRID AI-POWERED ANALYTICS")
+
+# Professional UI Styling (Original + AI Enhancements)
+st.markdown("""
+    <style>
+    .report-box {
+        background-color: #0E1117;
+        padding: 25px;
+        border-radius: 12px;
+        border: 1px solid #30363d;
+        border-left: 6px solid #ff00ff;
+        margin-top: 25px;
+        color: #E6EDF3;
+    }
+    .report-title {
+        color: #ff00ff;
+        font-size: 24px;
+        font-weight: 700;
+        margin-bottom: 15px;
+    }
+    .report-item {
+        margin-bottom: 12px;
+        font-size: 16px;
+        line-height: 1.6;
+        color: #C9D1D9;
+    }
+    .label {
+        color: #8B949E;
+        font-weight: 500;
+        margin-right: 5px;
+    }
+    .value {
+        color: #FFFFFF;
+        font-weight: 600;
+    }
+    .signal-buy { color: #00ff88; font-weight: 800; }
+    .signal-sell { color: #FF4B4B; font-weight: 800; }
+    .signal-neutral { color: #FFD700; font-weight: 800; }
+    .risk-high { color: #FF4B4B; font-weight: 800; }
+    .risk-medium { color: #FFA500; font-weight: 800; }
+    .risk-low { color: #00FF88; font-weight: 800; }
+    </style>
+""", unsafe_allow_html=True)
+
+# Kafka Connection - Listening to AI Engine Output
+@st.cache_resource
+def get_kafka_consumer():
+    KAFKA_URL = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka-service:9092')
+    try:
+        return KafkaConsumer(
+            'ai-predictions',
+            bootstrap_servers=[KAFKA_URL],
+            auto_offset_reset='latest',
+            value_deserializer=lambda x: json.loads(x.decode('utf-8')),
+            consumer_timeout_ms=1000,
+            group_id="ai-dashboard-v6"
+        )
+    except Exception as e:
+        st.error(f"Kafka Connection Error: {e}")
+        return None
+
+# Visual Analysis Functions (Restored for UI Depth)
+def calculate_visual_indicators(df):
+    if len(df) < 20: return df
+    df['SMA_20'] = df['current_price'].rolling(window=20).mean()
+    df['StdDev'] = df['current_price'].rolling(window=20).std()
+    df['Upper_Band'] = df['SMA_20'] + (df['StdDev'] * 2)
+    df['Lower_Band'] = df['SMA_20'] - (df['StdDev'] * 2)
+    
+    # Estimate VWAP proxy if quantity is not streamed from predictor
+    df['pseudo_quantity'] = np.random.uniform(0.1, 5.0, size=len(df)) 
+    df['VWAP'] = (df['current_price'] * df['pseudo_quantity']).cumsum() / df['pseudo_quantity'].cumsum()
+    return df
+
+def run_visual_anomaly_detection(df):
+    if len(df) < 50: return df
+    model = IsolationForest(contamination=0.05, random_state=42)
+    data_for_ai = df[['current_price']].fillna(0)
+    scaler = StandardScaler()
+    scaled_data = scaler.fit_transform(data_for_ai)
+    df['anomaly'] = model.fit_predict(scaled_data)
+    return df
+
+# Hybrid Market Report Generator
+def generate_hybrid_report(df, last_data):
+    if len(df) < 50: return "Insufficient data for deep analysis."
+    
+    last_price = last_data['current_price']
+    lstm_target = last_data['lstm_predicted_price']
+    xgb_signal = last_data['xgb_signal']
+    std_dev = df['StdDev'].iloc[-1] if 'StdDev' in df.columns else 0
+    anomalies = df[df['anomaly'] == -1].shape[0] if 'anomaly' in df.columns else 0
+    
+    # Restored Risk Score Calculation
+    anomaly_risk = min(40, anomalies * 2)
+    vol_risk = min(30, (std_dev / last_price) * 10000)
+    total_risk = min(100, anomaly_risk + vol_risk + 15)
+    
+    if total_risk > 70: risk_status, r_class = "CRITICAL", "risk-high"
+    elif total_risk > 40: risk_status, r_class = "ELEVATED", "risk-medium"
+    else: risk_status, r_class = "STABLE", "risk-low"
+
+    # XGBoost Signal CSS
+    if xgb_signal == "BUY": s_class = "signal-buy"
+    elif xgb_signal == "SELL": s_class = "signal-sell"
+    else: s_class = "signal-neutral"
+
+    spread = lstm_target - last_price
+
+    return f"""
+    <div class='report-box'>
+        <div class='report-title'>Hybrid Intelligence & Risk Analysis</div>
+        <div class='report-item'><span class='label'>Market Risk Score:</span> <span class='{r_class}'>{total_risk:.0f}/100 ({risk_status})</span></div>
+        <div class='report-item'><span class='label'>XGBoost Action Signal:</span> <span class='{s_class}'>{xgb_signal}</span></div>
+        <div class='report-item'><span class='label'>LSTM Next Target:</span> <span class='value'>${lstm_target:.2f} (Spread: ${spread:.2f})</span></div>
+        <div class='report-item'><span class='label'>Volatility Index:</span> <span class='value'>{std_dev:.2f} (Based on StdDev)</span></div>
+        <div class='report-item'><span class='label'>Anomalous Events:</span> <span class='value'>{anomalies} Patterns Detected by Isolation Forest</span></div>
+        <div style='margin-top: 15px; color: #8B949E; font-size: 12px; font-style: italic;'>
+            Hybrid AI Engine Refresh: {datetime.now().strftime('%H:%M:%S')}
+        </div>
+    </div>
+    """
+
+# Buffer Initialization
+if 'buffer' not in st.session_state:
+    st.session_state.buffer = []
+if 'last_report_time' not in st.session_state:
+    st.session_state.last_report_time = 0
+if 'latest_report' not in st.session_state:
+    st.session_state.latest_report = "Initializing Hybrid Risk Engine..."
+
+# Main Dashboard Fragment
+@st.fragment(run_every=1)
+def analytics_dashboard():
+    consumer = get_kafka_consumer()
+    if not consumer: return
+    
+    msg_pack = consumer.poll(timeout_ms=500)
+    for tp, messages in msg_pack.items():
+        for msg in messages:
+            data = msg.value
+            ts = data['timestamp'] / 1000.0 if data['timestamp'] > 1e11 else data['timestamp']
+            
+            st.session_state.buffer.append({
+                "time": datetime.fromtimestamp(ts),
+                "current_price": data['current_price'],
+                "lstm_predicted_price": data['lstm_predicted_price'],
+                "xgb_signal": data['xgb_signal'],
+                "rsi": data['rsi']
+            })
+
+    if len(st.session_state.buffer) > 500:
+        st.session_state.buffer = st.session_state.buffer[-500:]
+
+    if len(st.session_state.buffer) > 20:
+        df = pd.DataFrame(st.session_state.buffer)
+        df = calculate_visual_indicators(df)
+        df = run_visual_anomaly_detection(df)
+        
+        last_data = df.iloc[-1]
+        
+        current_time = time.time()
+        if current_time - st.session_state.last_report_time > 5:
+            st.session_state.latest_report = generate_hybrid_report(df, last_data)
+            st.session_state.last_report_time = current_time
+
+        # Plotly Charts - Restored 4-Chart Layout
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("Price, Bollinger Bands & LSTM Target")
+            fig1 = go.Figure()
+            fig1.add_trace(go.Scatter(x=df['time'], y=df['current_price'], name='Price', line=dict(color='#00ff88')))
+            fig1.add_trace(go.Scatter(x=df['time'], y=df['Upper_Band'], name='Upper BB', line=dict(color='gray', dash='dash')))
+            fig1.add_trace(go.Scatter(x=df['time'], y=df['Lower_Band'], name='Lower BB', line=dict(color='gray', dash='dash'), fill='tonexty'))
+            fig1.add_trace(go.Scatter(x=df['time'], y=df['lstm_predicted_price'], name='LSTM Prediction', line=dict(color='#ff00ff', dash='dot')))
+            fig1.update_layout(template="plotly_dark", height=300, margin=dict(l=0,r=0,t=30,b=0))
+            st.plotly_chart(fig1, use_container_width=True)
+            
+        with col2:
+            st.subheader("AI Engine RSI Momentum")
+            fig2 = go.Figure(go.Scatter(x=df['time'], y=df['rsi'], name='AI RSI', line=dict(color='#00ccff')))
+            fig2.add_hline(y=70, line_dash="dot", line_color="red")
+            fig2.add_hline(y=30, line_dash="dot", line_color="green")
+            fig2.update_layout(template="plotly_dark", height=300, margin=dict(l=0,r=0,t=30,b=0), yaxis_range=[0,100])
+            st.plotly_chart(fig2, use_container_width=True)
+
+        col3, col4 = st.columns(2)
+        
+        with col3:
+            st.subheader("XGBoost Signals & VWAP Trend")
+            fig3 = go.Figure()
+            fig3.add_trace(go.Scatter(x=df['time'], y=df['current_price'], name='Price', line=dict(color='#444')))
+            fig3.add_trace(go.Scatter(x=df['time'], y=df['VWAP'], name='VWAP', line=dict(color='#ffa500', width=2)))
+            
+            # XGBoost Signals Overlay
+            buy_signals = df[df['xgb_signal'] == 'BUY']
+            sell_signals = df[df['xgb_signal'] == 'SELL']
+            if not buy_signals.empty:
+                fig3.add_trace(go.Scatter(x=buy_signals['time'], y=buy_signals['current_price'], mode='markers', name='BUY', marker=dict(color='#00ff88', size=10, symbol='triangle-up')))
+            if not sell_signals.empty:
+                fig3.add_trace(go.Scatter(x=sell_signals['time'], y=sell_signals['current_price'], mode='markers', name='SELL', marker=dict(color='#ff4b4b', size=10, symbol='triangle-down')))
+            
+            fig3.update_layout(template="plotly_dark", height=300, margin=dict(l=0,r=0,t=30,b=0))
+            st.plotly_chart(fig3, use_container_width=True)
+            
+        with col4:
+            st.subheader("Isolation Forest Anomaly Detection")
+            fig4 = go.Figure()
+            fig4.add_trace(go.Scatter(x=df['time'], y=df['current_price'], name='Normal', line=dict(color='#333')))
+            if 'anomaly' in df.columns:
+                anomalies = df[df['anomaly'] == -1]
+                if not anomalies.empty:
+                    fig4.add_trace(go.Scatter(x=anomalies['time'], y=anomalies['current_price'], mode='markers', name='Anomaly', marker=dict(color='red', size=8, symbol='x')))
+            fig4.update_layout(template="plotly_dark", height=300, margin=dict(l=0,r=0,t=30,b=0))
+            st.plotly_chart(fig4, use_container_width=True)
+
+        st.markdown(st.session_state.latest_report, unsafe_allow_html=True)
+    else:
+        st.info("Gathering AI prediction data. Waiting for buffer...")
+
+analytics_dashboard()
+--- END OF FILE: ./analytics-engine/dashboard.py ---
+
+--- START OF FILE: ./analytics-engine/prediction-engine/predictor.py ---
+import os
+import json
+import numpy as np
+import pandas as pd
+from kafka import KafkaConsumer, KafkaProducer
+from sklearn.preprocessing import MinMaxScaler
+from xgboost import XGBClassifier
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+import warnings
+
+# Mute warnings for a cleaner console
+warnings.filterwarnings('ignore')
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
+KAFKA_BOOTSTRAP = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka-service:9092')
+INPUT_TOPIC = 'candle-events' # Listening to aggregated minute candles
+OUTPUT_TOPIC = 'ai-predictions'
+
+class HybridAIEngine:
+    def __init__(self):
+        self.data_buffer = []
+        self.scaler = MinMaxScaler(feature_range=(0, 1))
+        self.min_training_size = 30 # Requires 30 minutes of candle data for initialization
+        self.producer = KafkaProducer(
+            bootstrap_servers=[KAFKA_BOOTSTRAP],
+            value_serializer=lambda v: json.dumps(v).encode('utf-8')
+        )
+
+    def calculate_technical_features(self, df):
+        # Calculating core indicators on candle close prices
+        df['SMA_10'] = df['price'].rolling(window=10).mean()
+        df['RSI'] = self.calculate_rsi(df['price'])
+        df['Momentum'] = df['price'].diff(4)
+        df.dropna(inplace=True)
+        return df
+
+    def calculate_rsi(self, series, period=14):
+        delta = series.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        rs = gain / loss
+        return 100 - (100 / (1 + rs))
+
+    def train_predict_xgboost(self, df):
+        # Target labeling for classification: 2 (Up), 0 (Down), 1 (Side/Hold)
+        df['Target'] = 1 
+        df.loc[df['price'].shift(-1) > df['price'], 'Target'] = 2 
+        df.loc[df['price'].shift(-1) < df['price'], 'Target'] = 0 
+        
+        features = ['price', 'quantity', 'SMA_10', 'RSI', 'Momentum']
+        X = df[features].iloc[:-1]
+        y = df['Target'].iloc[:-1]
+        
+        # Guard clause to ensure valid training set
+        if len(X) < 10 or len(y.unique()) <= 1:
+            return "HOLD"
+
+        model = XGBClassifier(n_estimators=20, max_depth=3, eval_metric='mlogloss')
+        model.fit(X, y)
+        
+        last_data = df[features].iloc[-1:].values
+        prediction = model.predict(last_data)[0]
+        
+        signals = {0: "SELL", 1: "HOLD", 2: "BUY"}
+        return signals.get(prediction, "HOLD")
+
+    def train_predict_lstm(self, df):
+        data = df['price'].values.reshape(-1, 1)
+        scaled_data = self.scaler.fit_transform(data)
+        look_back = 10 
+        
+        if len(scaled_data) <= look_back: 
+            return float(df['price'].iloc[-1])
+
+        X_train, y_train = [], []
+        for i in range(look_back, len(scaled_data)):
+            X_train.append(scaled_data[i-look_back:i, 0])
+            y_train.append(scaled_data[i, 0])
+            
+        X_train, y_train = np.array(X_train), np.array(y_train)
+        X_train = np.reshape(X_train, (X_train.shape[0], X_train.shape[1], 1))
+        
+        # Simplified LSTM architecture for live training
+        model = Sequential()
+        model.add(LSTM(units=50, return_sequences=False, input_shape=(X_train.shape[1], 1)))
+        model.add(Dense(units=1))
+        model.compile(optimizer='adam', loss='mean_squared_error')
+        model.fit(X_train, y_train, epochs=2, batch_size=1, verbose=0)
+        
+        last_sequence = scaled_data[-look_back:].reshape(1, look_back, 1)
+        predicted_scaled = model.predict(last_sequence, verbose=0)
+        predicted_price = self.scaler.inverse_price = self.scaler.inverse_transform(predicted_scaled)
+        
+        return float(predicted_price[0][0])
+
+    def run(self):
+        print("AI Prediction Engine Started (Minute Candles mode)...", flush=True)
+        consumer = KafkaConsumer(
+            INPUT_TOPIC,
+            bootstrap_servers=[KAFKA_BOOTSTRAP],
+            value_deserializer=lambda x: json.loads(x.decode('utf-8'))
+        )
+
+        for message in consumer:
+            candle = message.value
+            # Normalizing candle fields for the model buffer
+            self.data_buffer.append({
+                't': candle['timestamp'],
+                'p': candle['close'],
+                'q': candle['volume']
+            })
+            
+            if len(self.data_buffer) > 200:
+                self.data_buffer.pop(0)
+
+            if len(self.data_buffer) > self.min_training_size:
+                df = pd.DataFrame(self.data_buffer)
+                df['price'] = pd.to_numeric(df['p'])
+                df['quantity'] = pd.to_numeric(df['q'])
+                
+                df = self.calculate_technical_features(df)
+                xgb_signal = self.train_predict_xgboost(df.copy())
+                lstm_price = self.train_predict_lstm(df.copy())
+                
+                result = {
+                    'timestamp': candle['timestamp'],
+                    'current_price': float(candle['close']),
+                    'lstm_predicted_price': lstm_price,
+                    'xgb_signal': xgb_signal,
+                    'rsi': float(df['RSI'].iloc[-1])
+                }
+                
+                self.producer.send(OUTPUT_TOPIC, result)
+                print(f"Prediction: Close={candle['close']} | Target={lstm_price:.2f}", flush=True)
+
+if __name__ == "__main__":
+    HybridAIEngine().run()
+--- END OF FILE: ./analytics-engine/prediction-engine/predictor.py ---
+
+--- START OF FILE: ./analytics-engine/prediction-engine/evaluator.py ---
+import os
+import json
+import pandas as pd
+import numpy as np
+from kafka import KafkaConsumer
+from datetime import datetime
+from collections import deque
+
+# Kafka Configuration
+KAFKA_BOOTSTRAP = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka-service:9092')
+INPUT_TOPIC = 'ai-predictions'
+
+class ModelEvaluator:
+    def __init__(self):
+        self.history = []
+        self.last_prediction = None
+        self.total_samples = 0
+        self.correct_directions = 0
+        self.lstm_errors = []
+        
+        # Buffer for calculating rolling accuracy (last 1000 trades)
+        self.rolling_window = deque(maxlen=1000)
+
+    def calculate_metrics(self):
+        if self.total_samples == 0:
+            return 0.0, 0.0
+
+        # Directional Accuracy (XGBoost)
+        dir_accuracy = (self.correct_directions / self.total_samples) * 100
+        
+        # LSTM Error (Mean Absolute Percentage Error)
+        avg_lstm_error = np.mean(self.lstm_errors) if self.lstm_errors else 0.0
+        
+        return dir_accuracy, avg_lstm_error
+
+    def process_message(self, message):
+        current_data = message.value
+        current_price = current_data['current_price']
+        timestamp = current_data['timestamp']
+        
+        # If we have a prediction from the PREVIOUS step, validate it now
+        if self.last_prediction is not None:
+            prev_price = self.last_prediction['current_price']
+            predicted_lstm_price = self.last_prediction['lstm_predicted_price']
+            predicted_signal = self.last_prediction['xgb_signal']
+            
+            # 1. Evaluate XGBoost (Directional Accuracy)
+            actual_movement = "HOLD"
+            if current_price > prev_price:
+                actual_movement = "BUY"
+            elif current_price < prev_price:
+                actual_movement = "SELL"
+            
+            is_correct_direction = (predicted_signal == actual_movement)
+            
+            # 2. Evaluate LSTM (Price Accuracy)
+            # Calculate absolute percentage error
+            error_margin = abs(current_price - predicted_lstm_price)
+            error_percentage = (error_margin / current_price) * 100
+            
+            # Update Stats
+            self.total_samples += 1
+            if is_correct_direction:
+                self.correct_directions += 1
+            
+            self.lstm_errors.append(error_percentage)
+            
+            # Log for CSV
+            log_entry = {
+                'timestamp': timestamp,
+                'prev_price': prev_price,
+                'actual_price': current_price,
+                'lstm_predicted': predicted_lstm_price,
+                'xgb_signal': predicted_signal,
+                'actual_movement': actual_movement,
+                'direction_correct': is_correct_direction,
+                'lstm_error_pct': error_percentage
+            }
+            self.history.append(log_entry)
+            
+            # Periodic Console Report (Every 10 samples)
+            if self.total_samples % 10 == 0:
+                acc, mape = self.calculate_metrics()
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] Sample: {self.total_samples} | "
+                      f"XGBoost Accuracy: {acc:.2f}% | "
+                      f"LSTM Error Margin: {mape:.4f}%", flush=True)
+
+                # Auto-save report every 50 samples
+                if self.total_samples % 50 == 0:
+                    self.save_report()
+
+        # Store current prediction for NEXT iteration validation
+        self.last_prediction = current_data
+
+    def save_report(self):
+        df = pd.DataFrame(self.history)
+        filename = "model_performance_report.csv"
+        df.to_csv(filename, index=False)
+        print(f"--> Report saved to {filename}", flush=True)
+
+    def run(self):
+        print("Model Evaluator Started... Listening to Kafka topic: " + INPUT_TOPIC, flush=True)
+        consumer = KafkaConsumer(
+            INPUT_TOPIC,
+            bootstrap_servers=[KAFKA_BOOTSTRAP],
+            value_deserializer=lambda x: json.loads(x.decode('utf-8'))
+        )
+
+        for msg in consumer:
+            self.process_message(msg)
+
+if __name__ == "__main__":
+    evaluator = ModelEvaluator()
+    evaluator.run()
+
+--- END OF FILE: ./analytics-engine/prediction-engine/evaluator.py ---
+
+--- START OF FILE: ./analytics-engine/streamer.py ---
+import os
+import json
+import time
+import websocket # websocket-client kütüphanesi
+from kafka import KafkaProducer
+
+KAFKA_URL = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka-service:9092')
+TOPIC_NAME = 'trade-events'
+
+def get_producer():
+    for _ in range(10): # Kafka'nın hazır olmasını bekleme döngüsü
+        try:
+            return KafkaProducer(
+                bootstrap_servers=[KAFKA_URL],
+                value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+                acks=1
+            )
+        except Exception as e:
+            print(f"Waiting for Kafka: {e}", flush=True)
+            time.sleep(3)
+    return None
+
+def on_message(ws, message):
+    try:
+        trade_data = json.loads(message)
+        payload = {'t': trade_data['T'], 'p': trade_data['p'], 'q': trade_data['q']}
+        producer.send(TOPIC_NAME, payload)
+        # Sadece 10 saniyede bir log bas (performans için)
+        if int(time.time()) % 10 == 0:
+            print(f"Data Streaming: {payload['p']}", flush=True)
+    except Exception as e:
+        print(f"Send Error: {e}", flush=True)
+
+def on_error(ws, error):
+    print(f"WebSocket Error: {error}", flush=True)
+
+def on_close(ws, close_status_code, close_msg):
+    print("### Closed ###", flush=True)
+
+def connect():
+    # ping_interval Binance ile bağlantıyı canlı tutar (Heartbeat)
+    ws = websocket.WebSocketApp("wss://stream.binance.com:9443/ws/btcusdt@trade",
+                              on_message=on_message,
+                              on_error=on_error,
+                              on_close=on_close)
+    ws.run_forever(ping_interval=30, ping_timeout=10)
+
+if __name__ == "__main__":
+    producer = get_producer()
+    if producer:
+        while True:
+            try:
+                connect()
+            except Exception as e:
+                print(f"Reconnect due to: {e}", flush=True)
+                time.sleep(5)
+--- END OF FILE: ./analytics-engine/streamer.py ---
+
+--- START OF FILE: ./infra/docker-compose.yaml ---
+version: '3'
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: kafka
+    ports:
+      - "9092:9092"
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,PLAINTEXT_INTERNAL://kafka:29092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+
+--- END OF FILE: ./infra/docker-compose.yaml ---
+
+--- START OF FILE: ./Makefile ---
+IMAGE_NAME := mahmut/analytics-engine:v1
+JAVA_IMAGE := mahmut/data-collector:v1
+K8S_FILE := k8s/apps.yaml
+
+.PHONY: setup build deploy clean logs-collector logs-ai
+
+setup: build deploy
+	@echo "SYSTEM READY: SPRING BOOT + PYTHON AI PIPELINE ACTIVE."
+
+build:
+	@echo "Building Spring Boot Data Collector..."
+	@eval $$(minikube docker-env) && docker build -t $(JAVA_IMAGE) ./data-collector
+	@echo "Building Python Analytics Engine..."
+	@eval $$(minikube docker-env) && docker build -t $(IMAGE_NAME) ./analytics-engine
+
+deploy:
+	kubectl apply -f $(K8S_FILE)
+
+clean:
+	kubectl delete -f $(K8S_FILE) --ignore-not-found
+
+logs-collector:
+	kubectl logs -l app=data-collector-engine -f
+
+logs-ai:
+	kubectl logs -l app=predictor-engine -f
+
+--- END OF FILE: ./Makefile ---

@@ -1,97 +1,59 @@
-# QuantStream: Real-Time Financial Data Pipeline and Visualization Engine
+# QuantStream: Real-Time Financial Data Pipeline and AI Forecasting
 
-QuantStream is a high-throughput, fault-tolerant distributed system designed to ingest, process, and visualize real-time cryptocurrency trade data. Built with a microservices architecture on Kubernetes, it leverages Apache Kafka for event streaming and Streamlit with fragment-based rendering for low-latency visualization.
+QuantStream is a distributed, end-to-end financial data engineering project designed to ingest, process, and analyze high-frequency trade data from Binance via WebSockets. The system leverages a microservices architecture orchestrated on Kubernetes, utilizing Apache Kafka as a resilient message backbone and hybrid AI models for real-time risk assessment and price forecasting.
 
 ## System Architecture
 
-The system follows a producer-consumer pattern decoupled by a message broker, ensuring scalability and resilience against backpressure.
+The project is built on a modular, event-driven architecture consisting of four primary layers:
 
-### 1. Data Ingestion Layer (Producer)
-- **Source:** Binance WebSocket API.
-- **Mechanism:** Asynchronous Python client (aiohttp) establishes a persistent connection to the btcusdt@trade stream.
-- **Serialization:** Raw JSON payloads are serialized into bytes and pushed to the Kafka topic 'trade-events'.
-- **Fault Tolerance:** Implements automatic reconnection logic with exponential backoff strategies for WebSocket stability.
+1.  **Ingestion Layer (Java / Spring Boot):** High-throughput service that maintains a persistent WebSocket connection to Binance, capturing raw trade events and producing them to Kafka topics.
+2.  **Stream Processing Layer (Python / Pandas):** An optimized aggregator that transforms raw trade ticks into deterministic 5-minute OHLCV (Open, High, Low, Close, Volume) candles using an O(1) time-boundary windowing strategy.
+3.  **Intelligence Layer (TensorFlow / XGBoost):** A quantitative engine that utilizes LSTM networks for price target prediction, XGBoost for signal generation, and Isolation Forest for real-time anomaly detection.
+4.  **Visualization Layer (Streamlit):** A live dashboard providing real-time observability of market metrics, including VWAP, Bollinger Bands, and AI-driven risk scores.
 
-### 2. Message Broker Layer (Kafka)
-- **Topic:** trade-events
-- **Configuration:** Single-node Kafka broker deployed via Bitnami Helm charts on Kubernetes.
-- **Retention Policy:** Configured for high-throughput, short-retention bursts to optimize storage for real-time analysis.
+## Key Technical Features
 
-### 3. Analytics and Visualization Engine (Consumer)
-- **Framework:** Streamlit (Python).
-- **Consumer Logic:** kafka-python library creates a consumer group (dashboard-group) to read messages.
-- **Rendering Optimization:**
-  - Utilizes the '@st.fragment' decorator to isolate chart component updates.
-  - Prevents full-page re-renders, reducing CPU/Memory usage significantly.
-  - Eliminates "DuplicateElementId" errors by managing component lifecycles independently.
-- **Data Buffer:** A rolling window buffer (circular queue) retains the last N data points for plotting, ensuring O(1) memory complexity.
+### Optimized Data Aggregation
+The aggregator service implements a stateful windowing logic that avoids redundant DataFrame reconstructions. By monitoring time boundaries instead of buffer sizes, the system achieves constant time complexity for real-time stream processing, ensuring zero-lag during high-volatility periods.
 
-## Tech Stack and Key Decisions
+### Hybrid AI Forecasting
+- **LSTM (Long Short-Term Memory):** Predicts future price targets based on historical temporal patterns.
+- **XGBoost:** Generates actionable signals (Buy/Sell/Hold) by analyzing momentum and volatility indicators.
+- **Isolation Forest:** Identifies market anomalies and "fat-finger" events in real-time.
 
-| Component | Technology | Rationale |
-|-----------|------------|-----------|
-| **Orchestration** | Kubernetes (Minikube) | Provides self-healing pods, service discovery, and declarative infrastructure. |
-| **Streaming** | Apache Kafka | Decouples producers/consumers, handles backpressure, and ensures exactly-once delivery semantics. |
-| **Visualization** | Streamlit + Plotly | Enables rapid prototyping. Plotly provides hardware-accelerated SVG/WebGL charts. |
-| **Language** | Python 3.11 | Extensive ecosystem for data engineering (pandas, numpy) and network programming. |
+### Infrastructure and Observability
+- **Kubernetes Orchestration:** All services are containerized and managed via K8s deployments with self-healing capabilities and automated rollouts.
+- **Message Reliability:** Apache Kafka ensures fault tolerance and state recovery, allowing consumers to replay data from specific offsets.
+- **Observability Suite:** Includes a custom bash-based monitoring utility for real-time pod health and log analysis.
 
-## Installation and Deployment
+## Prerequisites
 
-This project uses a Makefile to abstract complex Docker and Kubernetes commands into simple verbs.
-
-### Prerequisites
+- Kubernetes Cluster (Minikube / EKS / GKE)
+- Helm (for Kafka/Zookeeper deployment)
 - Docker
-- Minikube
-- kubectl
+- Python 3.9+
+- JDK 17+
 
-### Quick Start Workflow
+## Deployment
 
-1. **Initialize the Environment**
-   This command cleans legacy resources, builds the Docker image (using cache for speed), applies Kubernetes manifests, and waits for pod readiness.
+1. Start the infrastructure:
+   ```bash
+   kubectl apply -f k8s/infrastructure/
+   ```
 
-   make setup
+2. Deploy the microservices:
+   ```bash
+   kubectl apply -f k8s/services/
+   ```
 
-2. **Access the Dashboard**
-   Establishes a secure tunnel from the Kubernetes cluster to localhost.
+3. Access the dashboard:
+   ```bash
+   kubectl port-forward service/dashboard-service 8501:8501
+   ```
 
-   make tunnel
+## Development Team
+- **Mahmut:** AI & Data Engineer - Model architecture, stream processing optimization, and data pipeline design.
+- **Bengi:** Infrastructure Engineer - Kubernetes orchestration, Kafka configuration, and backend resilience.
 
-   > Access the UI at: http://localhost:8501
-
-3. **Monitor Logs**
-   View real-time ingestion and processing logs.
-
-   make logs
-
-4. **Clean Up**
-   Remove all resources and kill background port forwarding processes.
-
-   make clean
-
-## Project Structure
-
-.
-├── analytics-engine/       # Microservice: Dashboard and Consumer
-│   ├── Dockerfile          # Multi-stage build for Python env
-│   ├── dashboard.py        # Streamlit app with Fragment architecture
-│   ├── entrypoint.sh       # Smart startup script with Kafka health checks
-│   └── requirements.txt    # Python dependencies
-├── k8s/                    # Infrastructure as Code (IaC)
-│   └── apps.yaml           # Deployment and Service definitions
-├── Makefile                # Automation scripts
-└── README.md               # Documentation
-
-## Troubleshooting and Resilience Implementation
-
-### Zombie Process Handling
-The Makefile includes aggressive cleanup routines (using fuser and pkill) to terminate orphaned processes on port 8501, resolving common ADDRINUSE errors during development iterations.
-
-### Kafka Connection Reliability
-The entrypoint.sh script implements a "wait-for-it" pattern. It polls the Kafka service availability using raw sockets before starting the Streamlit application, preventing the "CrashLoopBackOff" state caused by race conditions.
-
-### Memory Optimization
-By switching from st.rerun() to @st.fragment, the application avoids the memory ballooning associated with full-script re-execution loops in Streamlit, ensuring stability over long-running sessions.
-
----
-**Author:** Mahmut
-**License:** MIT
+## License
+This project is licensed under the MIT License.

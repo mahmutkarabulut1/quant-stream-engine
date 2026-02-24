@@ -1,55 +1,60 @@
 package com.quantstream.datacollector.service;
 
-import org.springframework.stereotype.Service;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.kafka.core.KafkaTemplate;
-import org.springframework.web.socket.client.WebSocketClient;
+import org.springframework.stereotype.Service;
 import org.springframework.web.socket.client.standard.StandardWebSocketClient;
-import org.springframework.web.socket.WebSocketHandler;
-import org.springframework.web.socket.WebSocketSession;
-import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
+import org.springframework.web.socket.TextMessage;
+import org.springframework.web.socket.WebSocketSession;
 import jakarta.annotation.PostConstruct;
-import java.util.concurrent.ExecutionException;
+import java.util.Map;
 
 @Service
-public class BinanceStreamService {
-
-    private static final String BINANCE_WS_URL = "wss://stream.binance.com:9443/ws/btcusdt@trade";
-    private static final String KAFKA_TOPIC = "trade-events";
-
+public class BinanceStreamService extends TextWebSocketHandler {
     private final KafkaTemplate<String, String> kafkaTemplate;
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
-    // Constructor Injection ile KafkaTemplate'i aliyoruz
+    @Value("${app.kafka.topic}")
+    private String topicName;
+
     public BinanceStreamService(KafkaTemplate<String, String> kafkaTemplate) {
         this.kafkaTemplate = kafkaTemplate;
     }
 
     @PostConstruct
-    public void connectToStream() {
-        System.out.println(">>> 🚀 Binance WebSocket Baglantisi Baslatiliyor...");
-        
-        WebSocketClient client = new StandardWebSocketClient();
-        
-        WebSocketHandler handler = new TextWebSocketHandler() {
-            @Override
-            public void afterConnectionEstablished(WebSocketSession session) {
-                System.out.println(">>> ✅ BAGLANTI BASARILI! Veriler Kafka'ya (" + KAFKA_TOPIC + ") akiyor...");
-            }
-
-            @Override
-            protected void handleTextMessage(WebSocketSession session, TextMessage message) {
-                // Gelen JSON verisini direkt Kafka'ya basiyoruz
-                kafkaTemplate.send(KAFKA_TOPIC, message.getPayload());
-                
-                // Terminali kitlememek icin sadece nokta basalim
-                System.out.print("."); 
-            }
-        };
-
+    public void connect() {
         try {
-            client.doHandshake(handler, BINANCE_WS_URL).get();
-        } catch (InterruptedException | ExecutionException e) {
-            System.err.println(">>> ❌ Baglanti Hatasi: " + e.getMessage());
+            StandardWebSocketClient client = new StandardWebSocketClient();
+            String uri = "wss://stream.binance.com:443/ws/btcusdt@trade";
+            client.execute(this, uri);
+            System.out.println("SPRING BOOT CONNECTING TO BINANCE: " + uri);
+        } catch (Exception e) {
+            System.err.println("CONNECTION FATAL ERROR: " + e.getMessage());
+        }
+    }
+
+    @Override
+    protected void handleTextMessage(WebSocketSession session, TextMessage message) {
+        try {
+            JsonNode node = objectMapper.readTree(message.getPayload());
+            Map<String, Object> payload = Map.of(
+                "t", node.get("T").asLong(),
+                "p", node.get("p").asText(),
+                "q", node.get("q").asText()
+            );
+            
+            String jsonPayload = objectMapper.writeValueAsString(payload);
+            kafkaTemplate.send(topicName, jsonPayload);
+            
+            // Print only prices ending in '0' to avoid terminal spam, but prove data flows
+            if (node.get("p").asText().endsWith("0")) {
+                System.out.println("DATA SENT TO KAFKA: Price = " + node.get("p").asText());
+            }
+        } catch (Exception e) {
+            System.err.println("DATA PARSING ERROR: " + e.getMessage());
         }
     }
 }
