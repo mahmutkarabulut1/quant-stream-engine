@@ -1,24 +1,32 @@
-IMAGE_NAME := mahmut/analytics-engine:v1
-JAVA_IMAGE := mahmut/data-collector:v1
+.PHONY: setup build deploy restart clean logs
 
-.PHONY: setup build deploy clean tunnel status
-
-setup: build deploy
-	@echo "INFRASTRUCTURE DEPLOYED SUCCESSFULLY."
+setup: build deploy restart
 
 build:
-	@eval $$(minikube docker-env) && docker build -t $(JAVA_IMAGE) ./data-collector
-	@eval $$(minikube docker-env) && docker build -t $(IMAGE_NAME) ./analytics-engine
+	@echo "Building Docker images with no-cache..."
+	eval $$(minikube docker-env) && docker build --no-cache -t quantstream/data-collector:latest ./data-collector
+	eval $$(minikube docker-env) && docker build --no-cache -t quantstream/analytics-engine:latest ./analytics-engine
 
 deploy:
-	kubectl apply -f k8s/kafka.yaml
+	@echo "Applying infrastructure definitions..."
+	kubectl apply -f k8s/infrastructure.yaml
+	@echo "Waiting for Kafka to be ready..."
+	kubectl wait --for=condition=ready pod -l app=kafka --timeout=120s || true
+	@echo "Applying application definitions..."
 	kubectl apply -f k8s/apps.yaml
 
+restart:
+	@echo "Forcing Kubernetes to pull latest images and restart pods..."
+	kubectl rollout restart deployment data-collector-engine
+	kubectl rollout restart deployment aggregator-engine
+	kubectl rollout restart deployment predictor-engine
+	kubectl rollout restart deployment dashboard-engine
+
 clean:
-	kubectl delete -f k8s/apps.yaml --ignore-not-found
+	@echo "Cleaning up Kubernetes resources..."
+	kubectl delete -f k8s/apps.yaml --ignore-not-found=true
+	kubectl delete -f k8s/infrastructure.yaml --ignore-not-found=true
 
-tunnel:
-	kubectl port-forward svc/dashboard-service 8501:8501
-
-status:
-	kubectl get pods -w
+logs:
+	@echo "Fetching dashboard logs..."
+	kubectl logs -f -l app=dashboard-engine

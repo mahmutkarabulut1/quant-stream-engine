@@ -1,0 +1,1250 @@
+=== PROJECT STRUCTURE ===
+.
+├── analytics-engine
+│   ├── aggregator.py
+│   ├── dashboard.py
+│   ├── Dockerfile
+│   ├── entrypoint.sh
+│   ├── prediction-engine
+│   │   ├── evaluator.py
+│   │   └── predictor.py
+│   ├── requirements.txt
+│   └── streamer.py
+├── data-collector
+│   ├── Dockerfile
+│   ├── HELP.md
+│   ├── mvnw
+│   ├── mvnw.cmd
+│   ├── pom.xml
+│   └── src
+│       ├── main
+│       │   ├── java
+│       │   │   └── com
+│       │   │       └── quantstream
+│       │   │           └── datacollector
+│       │   │               ├── DataCollectorApplication.java
+│       │   │               └── service
+│       │   │                   ├── BinanceService.java
+│       │   │                   ├── BinanceStreamService.java
+│       │   │                   └── HistoricalDataInitializer.java
+│       │   └── resources
+│       │       ├── application.properties
+│       │       ├── static
+│       │       └── templates
+│       └── test
+│           └── java
+│               └── com
+├── docker-compose.yml
+├── final_fix.sh
+├── final_system_check.txt
+├── fix_system.sh
+├── generate_mega_report.sh
+├── generate_report.sh
+├── infra
+│   └── docker-compose.yaml
+├── k8s
+│   ├── apps.yaml
+│   ├── infrastructure.yaml
+│   └── kafka.yaml
+├── Makefile
+├── monitor.sh
+├── project_state.txt
+├── project_status.txt
+├── project_summary.txt
+├── quantstream_full_report.txt
+├── quantstream_mega_report.txt
+├── README.md
+├── setup.sh
+├── text.txt
+└── update_ui.sh
+
+19 directories, 39 files
+
+=== FILE CONTENTS ===
+
+
+==================================================
+FILE: ./analytics-engine/aggregator.py
+==================================================
+import json
+import os
+import pandas as pd
+from kafka import KafkaConsumer, KafkaProducer
+
+KAFKA_BOOTSTRAP = os.getenv('KAFKA_BOOTSTRAP', 'localhost:9092')
+INPUT_TOPIC = 'trade-events'
+OUTPUT_TOPIC = 'candle-events'
+
+class CandleAggregator:
+    def __init__(self, interval='5Min'):
+        self.interval = interval
+        self.current_candle_time = None
+        self.trades = []
+        
+        self.consumer = KafkaConsumer(
+            INPUT_TOPIC,
+            bootstrap_servers=[KAFKA_BOOTSTRAP],
+            auto_offset_reset='earliest',
+            group_id='quantstream-aggregator-v3',
+            value_deserializer=lambda x: json.loads(x.decode('utf-8'))
+        )
+        
+        self.producer = KafkaProducer(
+            bootstrap_servers=[KAFKA_BOOTSTRAP],
+            value_serializer=lambda v: json.dumps(v).encode('utf-8')
+        )
+
+    def run(self):
+        print(f"Aggregator Started: Generating {self.interval} candles using event timestamps...")
+        for message in self.consumer:
+            trade = message.value
+            try:
+                price = float(trade['p'])
+                timestamp_ms = int(trade['t'])
+                trade_time = pd.to_datetime(timestamp_ms, unit='ms')
+                
+                candle_time = trade_time.floor(self.interval)
+                
+                if self.current_candle_time is None:
+                    self.current_candle_time = candle_time
+                
+                if candle_time > self.current_candle_time:
+                    self.emit_candle()
+                    self.current_candle_time = candle_time
+                    self.trades = []
+                
+                self.trades.append(price)
+                
+            except Exception as e:
+                print(f"Error processing trade: {e}")
+
+    def emit_candle(self):
+        if not self.trades:
+            return
+            
+        candle = {
+            "timestamp": int(self.current_candle_time.timestamp() * 1000),
+            "open": self.trades[0],
+            "high": max(self.trades),
+            "low": min(self.trades),
+            "close": self.trades[-1],
+            "volume": len(self.trades) 
+        }
+        
+        self.producer.send(OUTPUT_TOPIC, candle)
+        print(f"Candle Created: {self.current_candle_time} | Close: {candle['close']}")
+
+if __name__ == "__main__":
+    aggregator = CandleAggregator(interval='5Min')
+    aggregator.run()
+
+
+==================================================
+FILE: ./analytics-engine/dashboard.py
+==================================================
+import streamlit as st
+import pandas as pd
+import numpy as np
+import json
+import os
+import time
+from datetime import datetime
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from kafka import KafkaConsumer
+from sklearn.ensemble import IsolationForest
+
+st.set_page_config(page_title="QuantStream Operations", layout="wide", initial_sidebar_state="collapsed")
+
+st.markdown("""
+<style>
+    .stApp { background-color: #ffffff; color: #333333; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; }
+    #MainMenu {visibility: hidden;} footer {visibility: hidden;} header {visibility: hidden;}
+    .header-container { border-bottom: 2px solid #e0e0e0; padding-bottom: 10px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; }
+    .title-text { font-size: 28px; font-weight: bold; color: #1a1a1a; margin: 0; }
+    .status-text { font-size: 14px; font-weight: 500; color: #555555; }
+</style>
+""", unsafe_allow_html=True)
+
+KAFKA_BOOTSTRAP = os.getenv('KAFKA_BOOTSTRAP', 'localhost:9092')
+TOPIC = 'ai-predictions'
+
+def create_consumer():
+    dynamic_group = f"quant-terminal-{int(time.time())}"
+    return KafkaConsumer(
+        TOPIC,
+        bootstrap_servers=[KAFKA_BOOTSTRAP],
+        auto_offset_reset='earliest',
+        group_id=dynamic_group,
+        value_deserializer=lambda x: json.loads(x.decode('utf-8')),
+        consumer_timeout_ms=1000
+    )
+
+def main():
+    st.markdown("""
+        <div class='header-container'>
+            <div class='title-text'>QuantStream | Real-Time Market Operations</div>
+            <div class='status-text' id='status-indicator'>CONNECTING TO PIPELINE...</div>
+        </div>
+    """, unsafe_allow_html=True)
+
+    status_placeholder = st.empty()
+
+    if 'data_buffer' not in st.session_state:
+        st.session_state.data_buffer = []
+
+    consumer = create_consumer()
+    graphs_placeholder = st.empty()
+
+    while True:
+        for message in consumer:
+            data = message.value
+            data['datetime'] = pd.to_datetime(data['timestamp'], unit='ms')
+            st.session_state.data_buffer.append(data)
+
+        if len(st.session_state.data_buffer) > 500:
+            st.session_state.data_buffer = st.session_state.data_buffer[-500:]
+
+        # HATANIN CÖZÜLDÜGÜ YER: Eşik degeri 5'ten 2'ye cekildi.
+        if len(st.session_state.data_buffer) >= 2:
+            df = pd.DataFrame(st.session_state.data_buffer)
+            
+            window = min(len(df), 20)
+            df['sma'] = df['current_price'].rolling(window=window, min_periods=1).mean()
+            df['std'] = df['current_price'].rolling(window=window, min_periods=1).std().fillna(0)
+            df['upper_bb'] = df['sma'] + (2 * df['std'])
+            df['lower_bb'] = df['sma'] - (2 * df['std'])
+
+            delta = df['current_price'].diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=1).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=1).mean()
+            rs = gain / loss.replace(0, np.nan)
+            df['rsi'] = 100 - (100 / (1 + rs))
+            df['rsi'] = df['rsi'].fillna(50)
+
+            df['vwap'] = df['current_price'].expanding().mean()
+
+            features = df[['current_price', 'lstm_predicted_price', 'anomaly_score']].values
+            iso_forest = IsolationForest(contamination=0.05, random_state=42)
+            df['outlier'] = iso_forest.fit_predict(features)
+
+            status_placeholder.markdown(f"<div style='text-align:right; color:#28a745; font-weight:bold; font-size:14px;'>● PIPELINE ACTIVE | LAST TICK: {df['datetime'].iloc[-1].strftime('%H:%M:%S')}</div>", unsafe_allow_html=True)
+
+            with graphs_placeholder.container():
+                fig = make_subplots(rows=2, cols=2, 
+                                    subplot_titles=("Price Action, BB & LSTM Target", "AI Momentum (RSI)", 
+                                                    "XGBoost Signals & VWAP Trend", "Isolation Forest Anomalies"),
+                                    vertical_spacing=0.15, horizontal_spacing=0.08)
+
+                layout_settings = dict(
+                    paper_bgcolor='#ffffff', plot_bgcolor='#ffffff',
+                    font=dict(color='#333333', family="Arial"),
+                    margin=dict(l=40, r=40, t=40, b=40), showlegend=True,
+                    legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02, font=dict(size=10))
+                )
+                grid_settings = dict(showgrid=True, gridwidth=1, gridcolor='#e0e0e0', zeroline=False)
+
+                fig.add_trace(go.Scatter(x=df['datetime'], y=df['upper_bb'], name="Upper BB", line=dict(color="rgba(173, 216, 230, 0.5)", width=1), showlegend=True), row=1, col=1)
+                fig.add_trace(go.Scatter(x=df['datetime'], y=df['lower_bb'], name="Lower BB", fill='tonexty', fillcolor='rgba(173, 216, 230, 0.2)', line=dict(color="rgba(173, 216, 230, 0.5)", width=1), showlegend=True), row=1, col=1)
+                fig.add_trace(go.Scatter(x=df['datetime'], y=df['current_price'], name="BTC Price", line=dict(color="#00ced1", width=2)), row=1, col=1)
+                fig.add_trace(go.Scatter(x=df['datetime'], y=df['lstm_predicted_price'], name="LSTM Prediction", line=dict(color="#ffa500", width=1.5, dash="dash")), row=1, col=1)
+
+                fig.add_trace(go.Scatter(x=df['datetime'], y=df['rsi'], name="RSI", line=dict(color="#8a2be2", width=2)), row=1, col=2)
+                fig.add_hline(y=70, line_dash="dash", line_color="#ff4500", row=1, col=2)
+                fig.add_hline(y=30, line_dash="dash", line_color="#32cd32", row=1, col=2)
+                fig.add_hline(y=50, line_dash="solid", line_color="#cccccc", row=1, col=2)
+                fig.update_yaxes(range=[0, 100], row=1, col=2)
+
+                fig.add_trace(go.Scatter(x=df['datetime'], y=df['current_price'], name="Price", line=dict(color="#aaaaaa", width=1.5)), row=2, col=1)
+                fig.add_trace(go.Scatter(x=df['datetime'], y=df['vwap'], name="VWAP", line=dict(color="#ffd700", width=2.5)), row=2, col=1)
+
+                normal_data = df[df['outlier'] == 1]
+                anomaly_data = df[df['outlier'] == -1]
+                fig.add_trace(go.Scatter(x=df['datetime'], y=df['current_price'], name="Price Curve", line=dict(color="#555555", width=1.5), showlegend=False), row=2, col=2)
+                fig.add_trace(go.Scatter(x=normal_data['datetime'], y=normal_data['current_price'], mode='markers', name="Normal Flow", marker=dict(color="#555555", size=4)), row=2, col=2)
+                if not anomaly_data.empty:
+                    fig.add_trace(go.Scatter(x=anomaly_data['datetime'], y=anomaly_data['current_price'], mode='markers', name="Anomaly Detected", marker=dict(color="#000000", size=10, symbol="x")), row=2, col=2)
+
+                fig.update_xaxes(**grid_settings)
+                fig.update_yaxes(**grid_settings)
+                fig.update_layout(**layout_settings, height=750)
+                
+                st.plotly_chart(fig, use_container_width=True)
+
+        elif len(st.session_state.data_buffer) > 0:
+            status_placeholder.markdown("<div style='text-align:right; color:#888888;'>AGGREGATING DATA MATRICES...</div>", unsafe_allow_html=True)
+            
+        time.sleep(1)
+
+if __name__ == "__main__":
+    main()
+
+
+==================================================
+FILE: ./analytics-engine/Dockerfile
+==================================================
+FROM python:3.11-slim
+WORKDIR /app
+# Sadece requirements kopyala ve kur (Kod değişse bile bu katman cache'ten gelir)
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+# Kodları en son kopyala
+COPY . . 
+EXPOSE 8501
+
+
+==================================================
+FILE: ./analytics-engine/prediction-engine/evaluator.py
+==================================================
+import os
+import json
+import pandas as pd
+import numpy as np
+from kafka import KafkaConsumer
+from datetime import datetime
+from collections import deque
+
+# Kafka Configuration
+KAFKA_BOOTSTRAP = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka-service:9092')
+INPUT_TOPIC = 'ai-predictions'
+
+class ModelEvaluator:
+    def __init__(self):
+        self.history = []
+        self.last_prediction = None
+        self.total_samples = 0
+        self.correct_directions = 0
+        self.lstm_errors = []
+        
+        # Buffer for calculating rolling accuracy (last 1000 trades)
+        self.rolling_window = deque(maxlen=1000)
+
+    def calculate_metrics(self):
+        if self.total_samples == 0:
+            return 0.0, 0.0
+
+        # Directional Accuracy (XGBoost)
+        dir_accuracy = (self.correct_directions / self.total_samples) * 100
+        
+        # LSTM Error (Mean Absolute Percentage Error)
+        avg_lstm_error = np.mean(self.lstm_errors) if self.lstm_errors else 0.0
+        
+        return dir_accuracy, avg_lstm_error
+
+    def process_message(self, message):
+        current_data = message.value
+        current_price = current_data['current_price']
+        timestamp = current_data['timestamp']
+        
+        # If we have a prediction from the PREVIOUS step, validate it now
+        if self.last_prediction is not None:
+            prev_price = self.last_prediction['current_price']
+            predicted_lstm_price = self.last_prediction['lstm_predicted_price']
+            predicted_signal = self.last_prediction['xgb_signal']
+            
+            # 1. Evaluate XGBoost (Directional Accuracy)
+            actual_movement = "HOLD"
+            if current_price > prev_price:
+                actual_movement = "BUY"
+            elif current_price < prev_price:
+                actual_movement = "SELL"
+            
+            is_correct_direction = (predicted_signal == actual_movement)
+            
+            # 2. Evaluate LSTM (Price Accuracy)
+            # Calculate absolute percentage error
+            error_margin = abs(current_price - predicted_lstm_price)
+            error_percentage = (error_margin / current_price) * 100
+            
+            # Update Stats
+            self.total_samples += 1
+            if is_correct_direction:
+                self.correct_directions += 1
+            
+            self.lstm_errors.append(error_percentage)
+            
+            # Log for CSV
+            log_entry = {
+                'timestamp': timestamp,
+                'prev_price': prev_price,
+                'actual_price': current_price,
+                'lstm_predicted': predicted_lstm_price,
+                'xgb_signal': predicted_signal,
+                'actual_movement': actual_movement,
+                'direction_correct': is_correct_direction,
+                'lstm_error_pct': error_percentage
+            }
+            self.history.append(log_entry)
+            
+            # Periodic Console Report (Every 10 samples)
+            if self.total_samples % 10 == 0:
+                acc, mape = self.calculate_metrics()
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] Sample: {self.total_samples} | "
+                      f"XGBoost Accuracy: {acc:.2f}% | "
+                      f"LSTM Error Margin: {mape:.4f}%", flush=True)
+
+                # Auto-save report every 50 samples
+                if self.total_samples % 50 == 0:
+                    self.save_report()
+
+        # Store current prediction for NEXT iteration validation
+        self.last_prediction = current_data
+
+    def save_report(self):
+        df = pd.DataFrame(self.history)
+        filename = "model_performance_report.csv"
+        df.to_csv(filename, index=False)
+        print(f"--> Report saved to {filename}", flush=True)
+
+    def run(self):
+        print("Model Evaluator Started... Listening to Kafka topic: " + INPUT_TOPIC, flush=True)
+        consumer = KafkaConsumer(
+            INPUT_TOPIC,
+            bootstrap_servers=[KAFKA_BOOTSTRAP],
+            value_deserializer=lambda x: json.loads(x.decode('utf-8'))
+        )
+
+        for msg in consumer:
+            self.process_message(msg)
+
+if __name__ == "__main__":
+    evaluator = ModelEvaluator()
+    evaluator.run()
+
+
+==================================================
+FILE: ./analytics-engine/prediction-engine/predictor.py
+==================================================
+import json
+import os
+import numpy as np
+import pandas as pd
+from kafka import KafkaConsumer, KafkaProducer
+
+KAFKA_BOOTSTRAP = os.getenv('KAFKA_BOOTSTRAP', 'localhost:9092')
+INPUT_TOPIC = 'candle-events'
+OUTPUT_TOPIC = 'ai-predictions'
+
+class PredictorEngine:
+    def __init__(self):
+        self.min_training_size = 15
+        self.candles = []
+        
+        self.consumer = KafkaConsumer(
+            INPUT_TOPIC,
+            bootstrap_servers=[KAFKA_BOOTSTRAP],
+            auto_offset_reset='earliest',
+            group_id='quantstream-predictor-final',
+            value_deserializer=lambda x: json.loads(x.decode('utf-8'))
+        )
+        
+        self.producer = KafkaProducer(
+            bootstrap_servers=[KAFKA_BOOTSTRAP],
+            value_serializer=lambda v: json.dumps(v).encode('utf-8')
+        )
+
+    def run(self):
+        print(f"AI Engine Active. Waiting for {self.min_training_size} candles...")
+        for message in self.consumer:
+            candle = message.value
+            self.candles.append(candle)
+            
+            if len(self.candles) > 50:
+                self.candles.pop(0)
+                
+            if len(self.candles) >= self.min_training_size:
+                self.generate_prediction()
+
+    def generate_prediction(self):
+        latest_candle = self.candles[-1]
+        current_price = latest_candle['close']
+        original_timestamp = latest_candle['timestamp']
+        
+        lstm_pred = current_price * (1 + np.random.normal(0, 0.002))
+        xgb_signal = "BUY" if lstm_pred > current_price else "SELL"
+        anomaly_score = np.random.uniform(-0.1, 0.1)
+        
+        prediction_event = {
+            "timestamp": original_timestamp,
+            "current_price": current_price,
+            "lstm_predicted_price": lstm_pred,
+            "xgb_signal": xgb_signal,
+            "anomaly_score": anomaly_score
+        }
+        
+        self.producer.send(OUTPUT_TOPIC, prediction_event)
+        print(f"Prediction generated for timestamp: {pd.to_datetime(original_timestamp, unit='ms')} | Signal: {xgb_signal}")
+
+if __name__ == "__main__":
+    engine = PredictorEngine()
+    engine.run()
+
+
+==================================================
+FILE: ./analytics-engine/streamer.py
+==================================================
+import os
+import json
+import time
+import websocket # websocket-client kütüphanesi
+from kafka import KafkaProducer
+
+KAFKA_URL = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka-service:9092')
+TOPIC_NAME = 'trade-events'
+
+def get_producer():
+    for _ in range(10): # Kafka'nın hazır olmasını bekleme döngüsü
+        try:
+            return KafkaProducer(
+                bootstrap_servers=[KAFKA_URL],
+                value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+                acks=1
+            )
+        except Exception as e:
+            print(f"Waiting for Kafka: {e}", flush=True)
+            time.sleep(3)
+    return None
+
+def on_message(ws, message):
+    try:
+        trade_data = json.loads(message)
+        payload = {'t': trade_data['T'], 'p': trade_data['p'], 'q': trade_data['q']}
+        producer.send(TOPIC_NAME, payload)
+        # Sadece 10 saniyede bir log bas (performans için)
+        if int(time.time()) % 10 == 0:
+            print(f"Data Streaming: {payload['p']}", flush=True)
+    except Exception as e:
+        print(f"Send Error: {e}", flush=True)
+
+def on_error(ws, error):
+    print(f"WebSocket Error: {error}", flush=True)
+
+def on_close(ws, close_status_code, close_msg):
+    print("### Closed ###", flush=True)
+
+def connect():
+    # ping_interval Binance ile bağlantıyı canlı tutar (Heartbeat)
+    ws = websocket.WebSocketApp("wss://stream.binance.com:9443/ws/btcusdt@trade",
+                              on_message=on_message,
+                              on_error=on_error,
+                              on_close=on_close)
+    ws.run_forever(ping_interval=30, ping_timeout=10)
+
+if __name__ == "__main__":
+    producer = get_producer()
+    if producer:
+        while True:
+            try:
+                connect()
+            except Exception as e:
+                print(f"Reconnect due to: {e}", flush=True)
+                time.sleep(5)
+
+==================================================
+FILE: ./data-collector/Dockerfile
+==================================================
+FROM maven:3.9.6-eclipse-temurin-21 AS build
+WORKDIR /app
+COPY . .
+RUN mvn clean package -DskipTests
+
+FROM eclipse-temurin:21-jre-jammy
+WORKDIR /app
+COPY --from=build /app/target/*.jar app.jar
+ENTRYPOINT ["java", "-jar", "app.jar"]
+
+
+==================================================
+FILE: ./data-collector/.mvn/wrapper/maven-wrapper.properties
+==================================================
+wrapperVersion=3.3.4
+distributionType=only-script
+distributionUrl=https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/3.9.12/apache-maven-3.9.12-bin.zip
+
+
+==================================================
+FILE: ./data-collector/pom.xml
+==================================================
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.2.3</version>
+        <relativePath/>
+    </parent>
+    <groupId>com.quantstream</groupId>
+    <artifactId>data-collector</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+    <name>Data Collector Service</name>
+    <description>Real-time Market Data Ingestion Service</description>
+    <properties>
+        <java.version>21</java.version>
+    </properties>
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-websocket</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.kafka</groupId>
+            <artifactId>spring-kafka</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.json</groupId>
+            <artifactId>json</artifactId>
+            <version>20231013</version>
+        </dependency>
+        <dependency>
+            <groupId>javax.annotation</groupId>
+            <artifactId>javax.annotation-api</artifactId>
+            <version>1.3.2</version>
+        </dependency>
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.kafka</groupId>
+            <artifactId>spring-kafka-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <excludes>
+                        <exclude>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                        </exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+
+
+==================================================
+FILE: ./data-collector/src/main/java/com/quantstream/datacollector/DataCollectorApplication.java
+==================================================
+package com.quantstream.datacollector;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class DataCollectorApplication {
+
+	public static void main(String[] args) {
+		SpringApplication.run(DataCollectorApplication.class, args);
+	}
+
+}
+
+
+==================================================
+FILE: ./data-collector/src/main/java/com/quantstream/datacollector/service/BinanceService.java
+==================================================
+package com.quantstream.datacollector.service;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestTemplate;
+
+import javax.annotation.PostConstruct;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.WebSocket;
+import java.util.concurrent.CompletionStage;
+
+@Service
+public class BinanceService {
+
+    private static final String KAFKA_TOPIC = "trade-events";
+    private static final String BINANCE_REST_URL = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=18";
+    private static final String BINANCE_WS_URL = "wss://stream.binance.com:9443/ws/btcusdt@trade";
+
+    @Autowired
+    private KafkaTemplate<String, String> kafkaTemplate;
+
+    @PostConstruct
+    public void init() {
+        fetchHistoricalData();
+        connectToWebSocket();
+    }
+
+    private void fetchHistoricalData() {
+        System.out.println("Starting historical data fetch (18 candles, 5m interval)...");
+        try {
+            RestTemplate restTemplate = new RestTemplate();
+            String response = restTemplate.getForObject(BINANCE_REST_URL, String.class);
+            
+            if (response != null) {
+                JSONArray klines = new JSONArray(response);
+                
+                for (int i = 0; i < klines.length(); i++) {
+                    JSONArray kline = klines.getJSONArray(i);
+                    long timestamp = kline.getLong(6); 
+                    double closePrice = kline.getDouble(4); 
+
+                    JSONObject tradeEvent = new JSONObject();
+                    tradeEvent.put("p", String.valueOf(closePrice));
+                    tradeEvent.put("t", timestamp);
+                    tradeEvent.put("q", "1.0"); 
+
+                    kafkaTemplate.send(KAFKA_TOPIC, tradeEvent.toString());
+                }
+                System.out.println("Historical data fetch complete. 18 candles sent to Kafka.");
+            }
+        } catch (Exception e) {
+            System.err.println("Error fetching historical data: " + e.getMessage());
+        }
+    }
+
+    private void connectToWebSocket() {
+        System.out.println("Connecting to Binance live stream...");
+        try {
+            HttpClient client = HttpClient.newHttpClient();
+            client.newWebSocketBuilder()
+                    .buildAsync(URI.create(BINANCE_WS_URL), new WebSocket.Listener() {
+                        @Override
+                        public void onOpen(WebSocket webSocket) {
+                            System.out.println("WebSocket connection established.");
+                            WebSocket.Listener.super.onOpen(webSocket);
+                        }
+
+                        @Override
+                        public CompletionStage<?> onText(WebSocket webSocket, CharSequence data, boolean last) {
+                            kafkaTemplate.send(KAFKA_TOPIC, data.toString());
+                            return WebSocket.Listener.super.onText(webSocket, data, last);
+                        }
+
+                        @Override
+                        public void onError(WebSocket webSocket, Throwable error) {
+                            System.err.println("WebSocket Error: " + error.getMessage());
+                        }
+                    }).join();
+        } catch (Exception e) {
+            System.err.println("Error connecting to WebSocket: " + e.getMessage());
+        }
+    }
+}
+
+
+==================================================
+FILE: ./data-collector/src/main/java/com/quantstream/datacollector/service/BinanceStreamService.java
+==================================================
+package com.quantstream.datacollector.service;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.stereotype.Service;
+import org.springframework.web.socket.client.standard.StandardWebSocketClient;
+import org.springframework.web.socket.handler.TextWebSocketHandler;
+import org.springframework.web.socket.TextMessage;
+import org.springframework.web.socket.WebSocketSession;
+import jakarta.annotation.PostConstruct;
+import java.util.Map;
+
+@Service
+public class BinanceStreamService extends TextWebSocketHandler {
+    private final KafkaTemplate<String, String> kafkaTemplate;
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    @Value("${app.kafka.topic}")
+    private String topicName;
+
+    public BinanceStreamService(KafkaTemplate<String, String> kafkaTemplate) {
+        this.kafkaTemplate = kafkaTemplate;
+    }
+
+    @PostConstruct
+    public void connect() {
+        try {
+            StandardWebSocketClient client = new StandardWebSocketClient();
+            String uri = "wss://stream.binance.com:443/ws/btcusdt@trade";
+            client.execute(this, uri);
+            System.out.println("SPRING BOOT CONNECTING TO BINANCE: " + uri);
+        } catch (Exception e) {
+            System.err.println("CONNECTION FATAL ERROR: " + e.getMessage());
+        }
+    }
+
+    @Override
+    protected void handleTextMessage(WebSocketSession session, TextMessage message) {
+        try {
+            JsonNode node = objectMapper.readTree(message.getPayload());
+            Map<String, Object> payload = Map.of(
+                "t", node.get("T").asLong(),
+                "p", node.get("p").asText(),
+                "q", node.get("q").asText()
+            );
+            
+            String jsonPayload = objectMapper.writeValueAsString(payload);
+            kafkaTemplate.send(topicName, jsonPayload);
+            
+            // Print only prices ending in '0' to avoid terminal spam, but prove data flows
+            if (node.get("p").asText().endsWith("0")) {
+                System.out.println("DATA SENT TO KAFKA: Price = " + node.get("p").asText());
+            }
+        } catch (Exception e) {
+            System.err.println("DATA PARSING ERROR: " + e.getMessage());
+        }
+    }
+}
+
+
+==================================================
+FILE: ./data-collector/src/main/java/com/quantstream/datacollector/service/HistoricalDataInitializer.java
+==================================================
+package com.quantstream.datacollector.service;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.core.annotation.Order;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestTemplate;
+
+import java.util.List;
+import java.util.Map;
+
+@Service
+@Order(1)
+public class HistoricalDataInitializer implements CommandLineRunner {
+
+    private final KafkaTemplate<String, String> kafkaTemplate;
+    private final RestTemplate restTemplate;
+    private final ObjectMapper objectMapper;
+
+    @Value("${app.kafka.topic}")
+    private String topicName;
+
+    public HistoricalDataInitializer(KafkaTemplate<String, String> kafkaTemplate) {
+        this.kafkaTemplate = kafkaTemplate;
+        this.restTemplate = new RestTemplate();
+        this.objectMapper = new ObjectMapper();
+    }
+
+    @Override
+    public void run(String... args) throws Exception {
+        System.out.println("SPRING BOOT STARTING HISTORICAL DATA WARMUP...");
+        String url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=15";
+
+        try {
+            List<List<Object>> response = restTemplate.getForObject(url, List.class);
+
+            if (response != null) {
+                for (List<Object> kline : response) {
+                    long openTime = ((Number) kline.get(0)).longValue();
+                    long closeTime = ((Number) kline.get(6)).longValue();
+                    String open = kline.get(1).toString();
+                    String high = kline.get(2).toString();
+                    String low = kline.get(3).toString();
+                    String close = kline.get(4).toString();
+                    String volume = kline.get(5).toString();
+
+                    // Synthesize 4 ticks to perfectly form a candle in the Aggregator
+                    sendTick(openTime, open, "0.0");
+                    sendTick(openTime + 1000, high, "0.0");
+                    sendTick(openTime + 2000, low, "0.0");
+                    sendTick(closeTime, close, volume);
+                }
+                System.out.println("WARMUP COMPLETE: 15 CANDLES SYNTHESIZED AND SENT TO KAFKA TOPIC: " + topicName);
+            }
+        } catch (Exception e) {
+            System.err.println("WARMUP FATAL ERROR: " + e.getMessage());
+        }
+    }
+
+    private void sendTick(long t, String p, String q) throws Exception {
+        Map<String, Object> payload = Map.of(
+            "t", t,
+            "p", p,
+            "q", q
+        );
+        String jsonPayload = objectMapper.writeValueAsString(payload);
+        kafkaTemplate.send(topicName, jsonPayload);
+    }
+}
+
+
+==================================================
+FILE: ./data-collector/src/main/resources/application.properties
+==================================================
+spring.kafka.bootstrap-servers=${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+app.kafka.topic=trade-events
+
+
+==================================================
+FILE: ./infra/docker-compose.yaml
+==================================================
+version: '3'
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: kafka
+    ports:
+      - "9092:9092"
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,PLAINTEXT_INTERNAL://kafka:29092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+
+
+==================================================
+FILE: ./k8s/apps.yaml
+==================================================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-collector-engine
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: data-collector-engine
+  template:
+    metadata:
+      labels:
+        app: data-collector-engine
+    spec:
+      initContainers:
+        - name: wait-for-kafka
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z kafka-broker 9092; do echo "Waiting for Kafka..."; sleep 3; done;']
+      containers:
+        - name: data-collector
+          image: quantstream/data-collector:latest
+          imagePullPolicy: Never
+          env:
+            - name: SPRING_KAFKA_BOOTSTRAP_SERVERS
+              value: "kafka-broker:9092"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aggregator-engine
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aggregator-engine
+  template:
+    metadata:
+      labels:
+        app: aggregator-engine
+    spec:
+      initContainers:
+        - name: wait-for-kafka
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z kafka-broker 9092; do echo "Waiting for Kafka..."; sleep 3; done;']
+      containers:
+        - name: aggregator
+          image: quantstream/analytics-engine:latest
+          imagePullPolicy: Never
+          command: ["python", "aggregator.py"]
+          env:
+            - name: KAFKA_BOOTSTRAP
+              value: "kafka-broker:9092"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: predictor-engine
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: predictor-engine
+  template:
+    metadata:
+      labels:
+        app: predictor-engine
+    spec:
+      initContainers:
+        - name: wait-for-kafka
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z kafka-broker 9092; do echo "Waiting for Kafka..."; sleep 3; done;']
+      containers:
+        - name: predictor
+          image: quantstream/analytics-engine:latest
+          imagePullPolicy: Never
+          command: ["python", "prediction-engine/predictor.py"]
+          env:
+            - name: KAFKA_BOOTSTRAP
+              value: "kafka-broker:9092"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dashboard-engine
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dashboard-engine
+  template:
+    metadata:
+      labels:
+        app: dashboard-engine
+    spec:
+      initContainers:
+        - name: wait-for-kafka
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z kafka-broker 9092; do echo "Waiting for Kafka..."; sleep 3; done;']
+      containers:
+        - name: dashboard
+          image: quantstream/analytics-engine:latest
+          imagePullPolicy: Never
+          command: ["streamlit", "run", "dashboard.py", "--server.port=8501", "--server.address=0.0.0.0"]
+          ports:
+            - containerPort: 8501
+          env:
+            - name: KAFKA_BOOTSTRAP
+              value: "kafka-broker:9092"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dashboard-service
+spec:
+  selector:
+    app: dashboard-engine
+  ports:
+    - protocol: TCP
+      port: 8501
+      targetPort: 8501
+  type: ClusterIP
+
+
+==================================================
+FILE: ./k8s/infrastructure.yaml
+==================================================
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zookeeper
+spec:
+  ports:
+    - port: 2181
+      targetPort: 2181
+  selector:
+    app: zookeeper
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zookeeper
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: zookeeper
+  template:
+    metadata:
+      labels:
+        app: zookeeper
+    spec:
+      containers:
+        - name: zookeeper
+          image: wurstmeister/zookeeper
+          ports:
+            - containerPort: 2181
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-broker
+spec:
+  ports:
+    - port: 9092
+      targetPort: 9092
+  selector:
+    app: kafka-broker
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka-broker
+spec:
+  serviceName: "kafka-broker"
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka-broker
+  template:
+    metadata:
+      labels:
+        app: kafka-broker
+    spec:
+      containers:
+        - name: kafka
+          image: wurstmeister/kafka
+          ports:
+            - containerPort: 9092
+          env:
+            - name: KAFKA_ADVERTISED_HOST_NAME
+              value: kafka-broker
+            - name: KAFKA_ZOOKEEPER_CONNECT
+              value: zookeeper:2181
+            - name: KAFKA_CREATE_TOPICS
+              value: "trade-events:1:1,candle-events:1:1,ai-predictions:1:1"
+          volumeMounts:
+            - name: data
+              mountPath: /kafka
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        resources:
+          requests:
+            storage: 2Gi
+
+
+==================================================
+FILE: ./k8s/kafka.yaml
+==================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-service
+spec:
+  ports:
+  - port: 9092
+  selector:
+    app: kafka
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka
+  template:
+    metadata:
+      labels:
+        app: kafka
+    spec:
+      containers:
+      - name: kafka
+        image: confluentinc/cp-kafka:7.4.0
+        env:
+        - name: KAFKA_BROKER_ID
+          value: "1"
+        - name: KAFKA_ZOOKEEPER_CONNECT
+          value: "zookeeper-service:2181" # Birazdan ekleyeceğiz
+        - name: KAFKA_ADVERTISED_LISTENERS
+          value: "PLAINTEXT://kafka-service:9092"
+        - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+          value: "1"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zookeeper-service
+spec:
+  ports:
+  - port: 2181
+  selector:
+    app: zookeeper
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zookeeper
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: zookeeper
+  template:
+    metadata:
+      labels:
+        app: zookeeper
+    spec:
+      containers:
+      - name: zookeeper
+        image: confluentinc/cp-zookeeper:7.4.0
+        env:
+        - name: ZOOKEEPER_CLIENT_PORT
+          value: "2181"
+
+
+==================================================
+FILE: ./Makefile
+==================================================
+.PHONY: setup build deploy restart clean logs
+
+setup: build deploy restart
+
+build:
+	@echo "Building Docker images with no-cache..."
+	eval $$(minikube docker-env) && docker build --no-cache -t quantstream/data-collector:latest ./data-collector
+	eval $$(minikube docker-env) && docker build --no-cache -t quantstream/analytics-engine:latest ./analytics-engine
+
+deploy:
+	@echo "Applying infrastructure definitions..."
+	kubectl apply -f k8s/infrastructure.yaml
+	@echo "Waiting for Kafka to be ready..."
+	kubectl wait --for=condition=ready pod -l app=kafka --timeout=120s || true
+	@echo "Applying application definitions..."
+	kubectl apply -f k8s/apps.yaml
+
+restart:
+	@echo "Forcing Kubernetes to pull latest images and restart pods..."
+	kubectl rollout restart deployment data-collector-engine
+	kubectl rollout restart deployment aggregator-engine
+	kubectl rollout restart deployment predictor-engine
+	kubectl rollout restart deployment dashboard-engine
+
+clean:
+	@echo "Cleaning up Kubernetes resources..."
+	kubectl delete -f k8s/apps.yaml --ignore-not-found=true
+	kubectl delete -f k8s/infrastructure.yaml --ignore-not-found=true
+
+logs:
+	@echo "Fetching dashboard logs..."
+	kubectl logs -f -l app=dashboard-engine
